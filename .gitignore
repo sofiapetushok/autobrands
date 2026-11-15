@@ -1,0 +1,20 @@
+# Locally sourced or derived full-scale datasets; publish only reviewed demo files
+/data/*
+!/data/demo_claims.csv
+!/data/demo_catalog.csv
+/output/
+/legacy/
+/benchmark/.cache/
+*.zip
+*.xlsx
+*.parquet
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
