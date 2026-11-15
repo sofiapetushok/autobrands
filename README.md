@@ -1,78 +1,63 @@
 # AutoBrands
 
-**Explainable vehicle make/model entity resolution for noisy records.**
+**Explainable, catalog-aware vehicle make/model entity resolution in Python.**
 
-Python pipeline for profiling, normalizing and matching vehicle descriptions against a reference catalog. Supports Greek/Latin comparison views, typo-tolerant candidate retrieval, cross-field recognition, conservative ambiguity handling, and an `extra_info` output for selected reported attributes.
+AutoBrands standardizes noisy vehicle names using Unicode normalization, Greek-to-Latin comparison, exact/alias matching, and guarded fuzzy ranking. It keeps uncertain identities unresolved rather than inventing vehicle variants.
 
-## What it does
+## Capabilities
 
-- **Profiling:** missing fields, repeated values, mixed writing systems.
-- **Preprocessing:** Unicode case/spacing normalization and an additional Greek-to-Latin comparison channel, preserving source text.
-- **Entity resolution:** exact, alias, catalog-aware fuzzy and contextual matching, with ranked candidates.
-- **Safeguards:** model numbers, variants, brand/model conflicts and abstention.
-- **Explanations:** status, method, score, candidates, quality flags and `extra_info`.
-- **Optional LLM routing dry-run:** produces validated candidate-selection plans without making API calls. Actual LLM model inference is **not** a feature of this release.
+- CSV profiling: missingness, recurring values, writing systems
+- Source-preserving text normalization and Greek/Latin comparison
+- Exact, alias, fuzzy and cross-field identification against a reference catalog
+- Variant and numeric-code safeguards; ranked alternatives for ambiguous inputs
+- Match statuses, similarity scores and unverified additional text (`extra_info`)
+- Optional LLM routing **dry-run only**; no inference API calls
 
-## Quick start (Python 3.10+)
+## Quick start
+
+Python 3.10+:
 
 ```bash
 python -m pip install -r requirements.txt
-python 01_explore.py data/demo_claims.csv
-python 02_normalize.py data/demo_claims.csv output/demo_normalized.csv
-python 03_match.py --input output/demo_normalized.csv --catalog data/demo_catalog.csv --output output/demo_matched.csv
+python 01_explore.py path/to/input.csv
+python 02_normalize.py path/to/input.csv output/normalized.csv
+python 03_match.py --input output/normalized.csv --catalog data/vehicle_catalog.csv --output output/matched.csv
 python -m unittest discover -s tests -v
 ```
 
-Outputs are written to `output/`, which is excluded from version control. No API credentials are required.
+Your input CSV must contain `claim_id,brand,model`. **No claim-level input records or sample claims are distributed in this repository.** Tests generate temporary input in memory/on disk during execution.
 
-For a larger dataset, provide a CSV with columns `claim_id,brand,model` and a properly licensed reference CSV with `brand,model,vehicle_type,aliases,source`, then pass the appropriate input/catalog paths. Do **not** use demo catalog coverage to draw conclusions about production accuracy.
+The reference catalog schema is `brand,model,vehicle_type,aliases,source`. It contains 14,742 deduplicated reference rows from the attributed open datasets below, not 14,742 unique manufacturer-confirmed identities. It may contain omissions, aliases and inconsistencies.
 
-## How it works
+Match scores represent textual similarity, **not calibrated probabilities**. `extra_info` preserves reported text and does not verify fuel type, vehicle specifications or compatibility. Full-match coverage and accuracy are different measures.
 
-```mermaid
-flowchart LR
-  A[Raw claims] --> B[01 Profile]
-  A --> C[02 Normalize]
-  C --> D[03 Match against catalog]
-  E[Licensed reference catalog] --> D
-  D --> F[Match status, identity, candidates, extra_info]
-  D -. optional dry-run .-> G[LLM request routing: no API calls]
-```
+## Reference data and attribution
 
-## Output interpretation
+The included `data/vehicle_catalog.csv` is a **modified, merged and deduplicated** make/model reference dataset sourced from:
 
-`EXACT_MATCH`, `ALIAS_MATCH`, `FUZZY_MATCH` are automatic identity selections; `PARTIAL_MATCH` is incomplete; `AMBIGUOUS`, `CONFLICT`, `UNRESOLVED` do **not** assert a full identity. `match_score` is a text similarity measure, **not a calibrated probability**. `extra_info` is reported source text, **not independently validated vehicle specifications**.
+1. [VehiclesDB](https://github.com/vehiclesdb/vehiclesdb), dataset version **2026.11.10**, **CC BY 4.0**. Credit: [Vehicle data by VehiclesDB](https://vehiclesdb.com). See its [upstream attribution notices](https://github.com/vehiclesdb/vehiclesdb/blob/main/ATTRIBUTION.md), which may include notices from the underlying official registers.
+2. [MotorcycleName](https://github.com/ixiehao/MotorcycleName), version **1.1.1**, **CC BY-SA 4.0**.
 
-| Example input | Intended behavior |
-|---|---|
-| `SUSUKI / Swift` | Candidate correction to Suzuki / Swift |
-| `Toyota / Yaris Cross` | Preserve model family `Cross` |
-| `Toyota / Land Cruiser DIESEL` | Preserve reported `DIESEL` as possible extra information |
-| `Tesla / Mode` | Abstain without a unique model |
-| `Yamaha / MT-09` | Never conflate model number with `MT-07` |
+The AutoBrands catalog is a transformed combination: it selects the relevant names, harmonizes vehicle types, merges overlapping make/model records and may incorporate aliases. The **combined dataset is distributed under CC BY-SA 4.0**, preserving source attribution and share-alike obligations. The Python source code is licensed separately under MIT (`LICENSE`). Source data is not relicensed under MIT.
 
-## Measured development results (historical, not a release accuracy estimate)
+See [data/README.md](data/README.md) for dataset provenance and required upstream notices. Third-party brand names remain the property of their respective owners.
 
-On a 15,000-row **synthetic** claims set with a larger external reference catalog, the latest candidate version returned **5,702 full matches (38.0% coverage)**. This is not precision, recall or verified correctness. A prior independent 5,000-case multilingual synthetic benchmark produced **97.81% accepted-match precision** and **33.20% identifiable recall**, **on an earlier pipeline version**: these figures must **not** be attributed to this final release. Its difficult cohorts exposed limitations in Greek context and multiple corruptions.
+## Limitations
 
-The system has also been run on public Craigslist and UK MOT records using distinct inputs and substantial caching. Reported full-match coverage was 44.60% (Craigslist) and 72.81% (MOT) on an earlier version; **real-world accuracy is not independently verified**. The MOT run benefited from repeated inputs and should not be read as a benchmark for 42M distinct strings.
+- Catalog coverage is incomplete; similar names can indicate distinct vehicles.
+- Fuzzy confidence is not calibrated and may produce wrong matches.
+- Greeklish, shorthand and multiple simultaneous corruptions remain challenging.
+- No independently established accuracy figure is claimed for this release.
+- Not a VIN decoder or validated vehicle-specifications service.
 
-## Known limitations
+## Files
 
-Catalog incompleteness and duplicate physical identities; generic or abbreviated names; difficult model codes; uncertain supplemental text; artificial transliterations in synthetic evaluations; lack of human-verified real-world precision; high-confidence wrong matches remain possible. Always inspect outcomes before using them in consequential workflows.
+| Path | Purpose |
+| --- | --- |
+| `01_explore.py` | Input profiling |
+| `02_normalize.py` | Normalization |
+| `03_match.py` | Catalog matching |
+| `data/vehicle_catalog.csv` | Attributed open reference data |
+| `tests/test_smoke.py` | Temporary-input end-to-end smoke test |
 
-## Data provenance and licensing
-
-Source code: MIT (`LICENSE`). Demonstration claims: CC0-1.0, to the extent of contributors' rights. Demo reference is a small curated list of publicly known names, **not** a redistributable full third-party dataset. Full `vehicle_catalog.csv`, cached datasets, original outputs, external benchmark corpora and potential restricted alias files are **not** published here pending source-by-source rights review. See `data/README.md`.
-
-## Project structure
-
-- `01_explore.py` — descriptive profiling
-- `02_normalize.py` — catalog-independent preprocessing
-- `03_match.py` — matching, decisions and optional routing dry-run
-- `data/` — included synthetic demo and small demo catalog
-- `tests/` — lightweight reproducible smoke tests
-
-## Roadmap
-
-Independent labeling with native-speaker validation; external-catalog coverage audit; improved acceptance calibration; optional cost-bounded LLM assistance (currently dry-run only).
+For reproducibility, use the exact catalog snapshot committed here; upstream datasets may change over time.
