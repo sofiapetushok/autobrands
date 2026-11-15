@@ -1,7 +1,7 @@
-# Locally sourced or derived full-scale datasets; publish only reviewed demo files
-/data/*
-!/data/demo_claims.csv
-!/data/demo_catalog.csv
+# Input/output files are local and must never be committed
+/claims*
+/data/claims*
+/data/*claims*
 /output/
 /legacy/
 /benchmark/.cache/
