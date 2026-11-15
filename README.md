@@ -59,19 +59,70 @@ The dataset is a modified compilation. Source records were selected, harmonized,
 
 ```text
 autobrands/
-├── 01_explore.py             # Dataset profiling
-├── 02_normalize.py           # Source-preserving text normalization
-├── 03_match.py               # Catalog-aware entity resolution
-├── data/
-│   ├── vehicle_catalog.csv  # Open, attributed reference catalog
-│   └── README.md            # Dataset sources and licensing
-├── tests/
-│   └── test_smoke.py        # Temporary-input integration smoke test
-├── requirements.txt
-├── LICENSE
-└── README.md
+|-- 01_explore.py             # Dataset profiling
+|-- 02_normalize.py           # Source-preserving normalization
+|-- 03_match.py               # CSV CLI and reporting
+|-- autobrands/
+|   |-- __init__.py
+|   |-- matching.py           # Deterministic catalog matching
+|   `-- llm.py                # Optional routing, validation and caching
+|-- data/
+|   |-- vehicle_catalog.csv   # Open, attributed reference catalog
+|   `-- README.md             # Sources and licensing
+|-- tests/
+|   |-- test_matching.py      # Matching regression tests
+|   |-- test_refactoring.py   # Original decision snapshots and module checks
+|   `-- test_smoke.py         # Temporary-input CLI and dry-run smoke test
+|-- requirements.txt
+|-- LICENSE
+`-- README.md
 ```
+
+The matching module does not import the optional LLM module. The CLI coordinates
+CSV input/output and opt-in LLM processing; matching thresholds and acceptance
+rules remain unchanged.
+
+## Tests and refactoring verification
+
+Run the complete checked-in suite:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+All 12 tests passed during refactoring verification. Coverage includes swapped
+and combined fields, Greek/Latin input, fuzzy typos, closely related variants,
+LLM cache persistence, and all three CLI commands. The LLM dry-run smoke test
+verifies zero API attempts and no output CSV.
+
+The suite includes 27 complete decision snapshots from pre-refactor commit
+`72b0751`, covering identities, statuses, scores, candidate ordering and
+`extra_info`. A separate local comparison of the original and refactored CLI
+produced byte-for-byte identical CSVs for all 15,000 claims, with row counts and
+IDs preserved. LLM dry-run routing also matched. Those private/local inputs and
+generated outputs are not included in Git; these checks establish refactoring
+parity, not independently labeled matching accuracy.
+
 
 ## Known limitations
 
 Fuzzy matches can still be wrong, particularly for near-identical vehicle variants, missing model numbers, abbreviations and multiple spelling errors. The catalog may contain omissions or inconsistent aliases. This project is not a VIN decoder or validated vehicle specification database.
+
+### Existing fuel-token behavior
+
+The separate local legacy suite passed 64 of 66 tests, with three failed
+assertions across two tests. The same assertions fail against the pre-refactor
+GitHub implementation:
+
+- `test_recognized_descriptions_require_complete_catalog_identity`: the
+  `PIONEER ΒΕΝΖΙΝΗ` and `PIONEER PETROL` fixtures return
+  `CATALOG_MODEL_REPORTED_FUEL` instead of the older expected method
+  `CATALOG_SUPPLEMENTARY_TEXT`.
+- `test_unfamiliar_or_catalog_defining_tokens_are_preserved`: the
+  `PIONEER DIESEL` fixture is accepted as `FUZZY_MATCH`, while the legacy
+  assertion expects abstention.
+
+These are existing fuel-token behavior differences from legacy expectations,
+not regressions introduced by module extraction. They remain unchanged in this
+release; reported fuel information must not be treated as verified vehicle
+specification. The external legacy suite is not part of the 12 checked-in tests.

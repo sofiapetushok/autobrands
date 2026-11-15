@@ -4,38 +4,18 @@ Run: python 03_match.py [--input output/claims_normalized.csv] [--catalog data/v
 Requires RapidFuzz. Scores are similarities, not calibrated probabilities.
 """
 
-import argparse
-import csv
-import hashlib
 import importlib.util
 import json
 import re
-import statistics
-import sys
-import tempfile
-import time
 import unicodedata
-from collections import Counter, defaultdict
-from contextlib import nullcontext
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from rapidfuzz import fuzz, process
 
 
 HERE = Path(__file__).resolve().parent.parent
-INPUT = HERE / "output" / "claims_normalized.csv"
-CATALOG = HERE / "data" / "vehicle_catalog.csv"
-BRAND_ALIASES = None  # Supply only an independently verified alias file.
-OUTPUT = HERE / "output" / "claims_matched.csv"
-OUTPUT_COLUMNS = (
-    "claim_id", "brand_raw", "model_raw", "brand_normalized", "model_normalized",
-    "brand_missing", "model_missing",
-    "corrected_brand", "corrected_model", "vehicle_type", "match_status",
-    "match_method", "match_score", "confidence_level", "candidate_count",
-    "top_candidates", "quality_flags", "brand_latin", "model_latin", "extra_info",
-)
 
 
 def load_phase2():

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import time
+import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Protocol
 
 from rapidfuzz import fuzz
 from .matching import (Matcher, Identity, Decision, norm, compact, latin_fold,
-                       name_tokens, token_signature, numeric_signature, informative)
+                       name_tokens, numeric_signature, informative)
 
 # Phase 5 is deliberately isolated from Matcher.resolve and its thresholds.
 LLM_PROMPT_VERSION = "vehicle-selection-v1"

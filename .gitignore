@@ -18,3 +18,13 @@ venv/
 !.env.example
 *.log
 .DS_Store
+
+# Local tabular inputs and generated results; publish only the reference catalog.
+*.csv
+*.tsv
+*.jsonl
+*.ndjson
+*.xls
+*.feather
+*.arrow
+!data/vehicle_catalog.csv

@@ -36,6 +36,10 @@ class PipelineSmokeTest(unittest.TestCase):
                 })
 
             subprocess.run(
+                [sys.executable, str(ROOT / "01_explore.py"), str(raw)],
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
                 [sys.executable, str(ROOT / "02_normalize.py"), str(raw), str(normalized)],
                 check=True, capture_output=True, text=True,
             )
@@ -52,6 +56,15 @@ class PipelineSmokeTest(unittest.TestCase):
             self.assertIn("match_status", results[0])
             self.assertIn("extra_info", results[0])
             self.assertIn("brand_latin", results[0])
+
+            dry_output = directory / "dry-run.csv"
+            dry_run = subprocess.run(
+                [sys.executable, str(ROOT / "03_match.py"), "--input", str(normalized),
+                 "--catalog", str(CATALOG), "--output", str(dry_output), "--llm-dry-run"],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertFalse(dry_output.exists())
+            self.assertIn("Actual API attempts: 0", dry_run.stdout)
 
 
 if __name__ == "__main__":
