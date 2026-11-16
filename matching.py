@@ -8,9 +8,10 @@ import json
 import re
 import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rapidfuzz import fuzz, process
+from rapidfuzz.distance import DamerauLevenshtein
 
 import normalize
 
@@ -264,6 +265,9 @@ class Matcher:
         identity = self.identities[identity_id]
         if not candidates:
             candidates = (Ranked(identity_id, score, 100, 100, method.lower()),)
+        if (identity.model_key.isdecimal() and len(identity.model_key) <= 3
+                and identity.vehicle_type == "unknown"):
+            return self.suggestion("AMBIGUOUS", "GENERIC_NUMERIC_MODEL", list(candidates))
         return Decision(
             corrected_brand=identity.brand, corrected_model=identity.model,
             vehicle_type=identity.vehicle_type, match_status=status,
@@ -549,6 +553,14 @@ class Matcher:
                         key in self.model_tokens or
                         family_risk or
                         (position >= max(end for _, end, _ in hits) and len(key) < 4)):
+                    brand_key, _ = self.brand_key(brand)
+                    if brand_key and model:
+                        ranked = self._rank(brand, model, self._candidate_ids(brand, model))
+                        relevant = [r for r in ranked if r.model_score >= self.min_model
+                                    and DamerauLevenshtein.distance(
+                                        compact(model), compact(self.identities[r.identity_id].model_key)) == 1]
+                        if relevant:
+                            return self.suggestion("AMBIGUOUS", "CATALOG_MENTION_WITH_EXTRA_MODEL_TEXT", relevant)
                     return self.suggestion("AMBIGUOUS", "CATALOG_MENTION_WITH_EXTRA_MODEL_TEXT",
                                            self._fixed_rank(identities, "catalog_mention"))
             # A complete catalog span is a strong candidate, but the catalog
@@ -733,6 +745,33 @@ class Matcher:
     def resolve(self, brand_value: str | None, model_value: str | None, *,
                 brand_latin: str | None = None, model_latin: str | None = None) -> Decision:
         brand, model = norm(brand_value), norm(model_value)
+        comparison_text(brand, brand_latin)
+        stripped = (brand[:-1] if isinstance(brand_value, str) and brand_value.endswith("/")
+                    and brand.endswith("/") and not brand.endswith("//") else "")
+        strip_brand_slash = (stripped in self.brands and not any(c in model for c in "+/")
+                             and len(self.exact_model_ids(model, stripped)) == 1)
+        decision = self._resolve(stripped if strip_brand_slash else brand_value, model_value,
+                                 brand_latin=None if strip_brand_slash else brand_latin,
+                                 model_latin=model_latin)
+        if decision.match_status in {"EXACT_MATCH", "ALIAS_MATCH", "FUZZY_MATCH"}:
+            identity = self.identities[self.by_pair[(norm(decision.corrected_brand), norm(decision.corrected_model))]]
+            punctuation = lambda text: tuple(c for c in text if c in "+/")
+            observed = punctuation((stripped if strip_brand_slash else brand) + model)
+            supported = {punctuation(identity.brand_key + variant) for variant in identity.variants}
+            if observed not in supported:
+                return self.suggestion("AMBIGUOUS", "MEANINGFUL_PUNCTUATION_MISMATCH",
+                                       list(decision.top_candidates))
+            if decision.match_status == "ALIAS_MATCH" and not decision.extra_info:
+                for original in (model_value, brand_value):
+                    value = norm(original)
+                    if value != identity.model_key and value in identity.variants:
+                        decision = replace(decision, extra_info=original)
+                        break
+        return decision
+
+    def _resolve(self, brand_value: str | None, model_value: str | None, *,
+                 brand_latin: str | None = None, model_latin: str | None = None) -> Decision:
+        brand, model = norm(brand_value), norm(model_value)
         brand_latin = comparison_text(brand, brand_latin)
         model_latin = comparison_text(model, model_latin)
         if not brand and not model:
@@ -809,6 +848,9 @@ class Matcher:
         runner_up = candidates[1].score if len(candidates) > 1 else 0.0
         margin = best.score - runner_up
         identity = self.identities[best.identity_id]
+        if (brand and brand.isascii() and model.isascii() and not brand_key
+                and best.brand_score < max(80, self.min_brand - 8) and best.model_score < 80):
+            return self.suggestion("AMBIGUOUS", "INSUFFICIENT_CANDIDATE_EVIDENCE", [])
         has_brand_evidence = bool(brand and best.brand_score >= self.min_brand)
         # A distinctive exact catalog model supplies independent evidence for
         # cross-script brand spelling; this rule does not inspect claim counts.
@@ -837,14 +879,14 @@ class Matcher:
         best_tokens = name_tokens(identity.model_key)
         input_tokens = name_tokens(model)
         if (brand_key == identity.brand_key and best.brand_score == 100
-                and best.model_score >= 80 and best.score >= 85 and margin >= 10
+                and best.model_score >= 80 and best.score >= 85 and margin >= self.min_margin
                 and len(input_tokens) <= len(best_tokens)
                 and bool(compact(model)) and bool(compact(identity.model_key))
                 and compact(model)[0] == compact(identity.model_key)[0]
                 and numeric_signature(model) == numeric_signature(identity.model_key)
-                and not model_family_risk(model, identity.model_key)
-                and not model_family_risk(model_latin,
-                                          normalize.latin_comparison_text(identity.model_key) or "")
+                and len(compact(model)) >= 4
+                and len(best_tokens) == len(input_tokens) == 1
+                and DamerauLevenshtein.distance(compact(model), compact(identity.model_key)) == 1
                 and not (model.isdecimal() and len(model) <= 3)
                 and not (len(best_tokens) > 1 and len(input_tokens) < len(best_tokens))):
             return self.accepted(best.identity_id, "FUZZY_MATCH", "RANKED_FUZZY_REVIEW_POLICY",

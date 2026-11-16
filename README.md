@@ -1,8 +1,10 @@
 # AutoBrands
 
-**Multilingual vehicle make/model entity resolution with explainable fuzzy matching.**
+**Python-based vehicle make and model matching using fuzzy string matching, multilingual text normalization, and catalog-backed entity resolution.**
 
-AutoBrands is a Python pipeline that identifies and standardizes vehicle makes and models from inconsistent text. It combines Unicode normalization, Greek-to-Latin comparison, catalog-aware candidate retrieval, and conservative decision rules.
+AutoBrands standardizes inconsistent car and motorcycle make/model descriptions, handling typos, Greek/Latin spellings, missing fields, swapped columns, and ambiguous model variants.
+
+Built with Python and RapidFuzz, with an emphasis on explainable matching decisions and conservative automatic acceptance.
 
 ## Features
 

@@ -56,6 +56,14 @@ class RefactoringTests(unittest.TestCase):
                 decision = self.matcher.resolve(brand, model)
                 payload = [dataclasses.asdict(decision), self.matcher.serialize_candidates(decision)]
                 actual = hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode()).hexdigest()
+                if (brand, model) == ("Toyota", "Corolla Crosss"):
+                    # Preserve the original hash above; the approved policy now
+                    # ranks the one-edit catalog variant as the suggestion.
+                    self.assertEqual(expected, "c6f7acdc03edeff04a9388a66d875e7813e8b362d6ca5c238bdc7fd9ed8b58ca")
+                    self.assertEqual((decision.match_status, decision.corrected_model), ("AMBIGUOUS", ""))
+                    self.assertEqual(self.matcher.identities[decision.top_candidates[0].identity_id].model,
+                                     "Corolla Cross")
+                    expected = "2992d7c16c818bc0d4a4ff20721b7e2289a13f44716386f9a12d2d37f8e5a611"
                 self.assertEqual(actual, expected)
 
     def test_matching_import_does_not_load_cli(self):
