@@ -5,14 +5,12 @@ import hashlib
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from autobrands.matching import Matcher
-from autobrands.llm import LLMDecisionCache
+from matching import Matcher
 
 CASES = [
     ('Toyota', 'Yaris', 'fc2de88ecc6f3e1e36b17e96a148b4cd04060ca1cca94dc16389b419e92a51ed'),
@@ -60,19 +58,9 @@ class RefactoringTests(unittest.TestCase):
                 actual = hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode()).hexdigest()
                 self.assertEqual(actual, expected)
 
-    def test_llm_cache_round_trip(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "nested" / "cache.json"
-            cache = LLMDecisionCache(path)
-            cache.responses["test-request"] = '{"decision": "ABSTAIN"}'
-            cache.save()
-            self.assertEqual(LLMDecisionCache(path).responses, cache.responses)
-            self.assertEqual(list(path.parent.iterdir()), [path])
-
-    def test_matching_import_does_not_load_llm_or_cli(self):
+    def test_matching_import_does_not_load_cli(self):
         subprocess.run([sys.executable, "-c",
-                        "import sys; import autobrands.matching; "
-                        "assert 'autobrands.llm' not in sys.modules; "
+                        "import sys; import matching; "
                         "assert 'run' not in sys.modules"], cwd=ROOT, check=True)
 
 

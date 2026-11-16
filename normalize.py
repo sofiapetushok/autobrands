@@ -1,4 +1,4 @@
-"""Phase 2: loss-conscious text normalization of raw vehicle claims.
+"""Loss-conscious text normalization of raw vehicle claims.
 
 Run: python normalize.py [input.csv] [output.csv]
 This stage does not identify vehicles or consult a reference catalogue.

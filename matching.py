@@ -1,35 +1,22 @@
-"""Phase 3: conservative make/model entity resolution over the pinned catalog.
+"""Conservative make/model entity resolution over the pinned catalog.
 
 Run: python run.py [--input output/claims_normalized.csv] [--catalog data/vehicle_catalog.csv]
 Requires RapidFuzz. Scores are similarities, not calibrated probabilities.
 """
 
-import importlib.util
 import json
 import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
-
-HERE = Path(__file__).resolve().parent.parent
-
-
-def load_phase2():
-    spec = importlib.util.spec_from_file_location("phase2_normalize", HERE / "normalize.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-PHASE2 = load_phase2()
+import normalize
 
 
 def norm(value: str | None) -> str:
-    return PHASE2.normalize_text(value) or ""
+    return normalize.normalize_text(value) or ""
 
 
 def compact(value: str) -> str:
@@ -46,15 +33,15 @@ def token_signature(value: str) -> tuple[str, ...]:
     return tuple(sorted(latin_fold(token) for token in name_tokens(value)))
 
 
-GREEK_LATIN = str.maketrans(PHASE2.GREEK_LETTERS)
-GREEK_VISUAL = str.maketrans(PHASE2.LATIN_DOMINANT_CONFUSABLES)
+GREEK_LATIN = str.maketrans(normalize.GREEK_LETTERS)
+GREEK_VISUAL = str.maketrans(normalize.LATIN_DOMINANT_CONFUSABLES)
 # Descriptions, not vehicle aliases. Catalog name tokens always take precedence.
 SUPPLEMENTARY_TOKENS = frozenset({"ΙΧ", "ΒΕΝΖΙΝΗ", "ΠΕΤΡΕΛΑΙΟ", "PETROL", "GASOLINE", "DIESEL"})
 
 
 def latin_fold(value: str) -> str:
     """Generic comparison form; canonical names and input text remain intact."""
-    if not value.isascii() and PHASE2.has_mixed_greek_latin(value):
+    if not value.isascii() and normalize.has_mixed_greek_latin(value):
         def mixed_word(match):
             word = match.group()
             latin = sum("LATIN" in unicodedata.name(c, "") for c in word)
@@ -68,7 +55,7 @@ def latin_fold(value: str) -> str:
 
 
 def comparison_text(value: str, supplied: str | None = None) -> str:
-    expected = PHASE2.latin_comparison_text(value) or ""
+    expected = normalize.latin_comparison_text(value) or ""
     if supplied and supplied != expected:
         raise ValueError("Latin comparison column disagrees with normalized text")
     return supplied if supplied else expected
@@ -105,7 +92,7 @@ def informative(value: str) -> bool:
         return False
     if re.fullmatch(r"-0+X+", value):
         return False
-    if PHASE2.is_possible_garbage(value):
+    if normalize.is_possible_garbage(value):
         return False
     return True
 
@@ -206,7 +193,7 @@ class Matcher:
                 self.model_choices_global[variant].add(identity_id)
                 self.compact_model_lookup[compact(variant)].add(identity_id)
                 self.folded_model_lookup[latin_fold(variant)].add(identity_id)
-                self.folded_model_lookup[latin_fold(PHASE2.latin_comparison_text(variant) or "")].add(identity_id)
+                self.folded_model_lookup[latin_fold(normalize.latin_comparison_text(variant) or "")].add(identity_id)
                 self.model_tokens.update(latin_fold(token) for token in name_tokens(variant))
                 if variant != key[1]:
                     self.alias_lookup[variant].add(identity_id)
@@ -296,7 +283,7 @@ class Matcher:
         brand_key, brand_alias = self.brand_key(brand)
         if brand_key and model:
             mixed_ids = (self.folded_model_lookup.get(latin_fold(model), set())
-                         if not model.isascii() and any(PHASE2.has_mixed_greek_latin(t)
+                         if not model.isascii() and any(normalize.has_mixed_greek_latin(t)
                                                         for t in name_tokens(model)) else set())
             ids = self.exact_model_ids(model, brand_key)
             if len(ids) == 1:
@@ -718,7 +705,7 @@ class Matcher:
                                for variant in identity.variants), default=0.0)
             if model_latin is not None:
                 model_score = max(model_score, max((self._model_similarity(
-                    model_latin, PHASE2.latin_comparison_text(variant) or "")
+                    model_latin, normalize.latin_comparison_text(variant) or "")
                     for variant in identity.variants), default=0.0))
             if brand_key and identity.brand_key != brand_key:
                 continue
@@ -839,7 +826,7 @@ class Matcher:
                 and best.score >= self.min_score and margin >= self.min_margin
                 and not extra_brand_token
                 and not model_family_risk(model, identity.model_key)
-                and not model_family_risk(model_latin, PHASE2.latin_comparison_text(identity.model_key) or "")
+                and not model_family_risk(model_latin, normalize.latin_comparison_text(identity.model_key) or "")
                 and not (model.isdecimal() and len(model) <= 3
                          and identity.vehicle_type == "unknown")):
             return self.accepted(best.identity_id, "FUZZY_MATCH", "RANKED_FUZZY",
@@ -857,7 +844,7 @@ class Matcher:
                 and numeric_signature(model) == numeric_signature(identity.model_key)
                 and not model_family_risk(model, identity.model_key)
                 and not model_family_risk(model_latin,
-                                          PHASE2.latin_comparison_text(identity.model_key) or "")
+                                          normalize.latin_comparison_text(identity.model_key) or "")
                 and not (model.isdecimal() and len(model) <= 3)
                 and not (len(best_tokens) > 1 and len(input_tokens) < len(best_tokens))):
             return self.accepted(best.identity_id, "FUZZY_MATCH", "RANKED_FUZZY_REVIEW_POLICY",
@@ -880,7 +867,7 @@ class Matcher:
                 and not extra_brand_token
                 and not model_family_risk(model, identity.model_key)
                 and not model_family_risk(model_latin,
-                                          PHASE2.latin_comparison_text(identity.model_key) or "")
+                                          normalize.latin_comparison_text(identity.model_key) or "")
                 and not any(other.identity_id != best.identity_id
                             and other.brand_score >= best.brand_score - 5
                             and other.model_score >= 98
