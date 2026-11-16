@@ -73,7 +73,7 @@ class RefactoringTests(unittest.TestCase):
         subprocess.run([sys.executable, "-c",
                         "import sys; import autobrands.matching; "
                         "assert 'autobrands.llm' not in sys.modules; "
-                        "assert '03_match' not in sys.modules"], cwd=ROOT, check=True)
+                        "assert 'run' not in sys.modules"], cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":
