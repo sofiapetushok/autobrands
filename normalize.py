@@ -1,7 +1,7 @@
-"""Loss-conscious text normalization of raw vehicle claims.
+"""Loss-conscious text normalization of raw vehicle brand/model data.
 
 Run: python normalize.py [input.csv] [output.csv]
-This stage does not identify vehicles or consult a reference catalogue.
+This command does not identify vehicles or consult a reference catalogue.
 It adds loss-conscious Latin comparison columns without replacing normalized text.
 """
 
