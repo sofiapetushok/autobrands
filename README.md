@@ -94,3 +94,8 @@ All **12 checked-in tests passed** in the latest refactoring verification. They 
 
 Refactoring was verified against **27 original decision snapshots** and a separate **15,000-row local comparison**: the original and refactored CSV outputs were byte-for-byte identical. LLM dry-run output also matched. These tests confirm **behavioral parity**, not matching accuracy on independently labeled data.
 
+## Known limitations
+
+The reference catalog is not exhaustive. Abbreviations, heavily corrupted inputs, near-identical model variants and catalog gaps can lead to abstentions or incorrect matches. Similarity scores are not calibrated probabilities, and reported fuel text in `extra_info` is not verified vehicle metadata.
+
+A separate legacy suite passes **64/66 tests**. Three assertions in two tests disagree with pre-existing fuel-token behavior; these same assertions also failed before the refactoring. The matching behavior has intentionally not been changed to satisfy those assertions.
