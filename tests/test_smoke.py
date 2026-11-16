@@ -36,11 +36,11 @@ class PipelineSmokeTest(unittest.TestCase):
                 })
 
             subprocess.run(
-                [sys.executable, str(ROOT / "01_explore.py"), str(raw)],
+                [sys.executable, str(ROOT / "explore.py"), str(raw)],
                 check=True, capture_output=True, text=True,
             )
             subprocess.run(
-                [sys.executable, str(ROOT / "02_normalize.py"), str(raw), str(normalized)],
+                [sys.executable, str(ROOT / "normalize.py"), str(raw), str(normalized)],
                 check=True, capture_output=True, text=True,
             )
             subprocess.run(
