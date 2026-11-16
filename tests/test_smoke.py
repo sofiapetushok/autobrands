@@ -44,7 +44,7 @@ class PipelineSmokeTest(unittest.TestCase):
                 check=True, capture_output=True, text=True,
             )
             subprocess.run(
-                [sys.executable, str(ROOT / "03_match.py"), "--input", str(normalized),
+                [sys.executable, str(ROOT / "run.py"), "--input", str(normalized),
                  "--catalog", str(CATALOG), "--output", str(matched)],
                 check=True, capture_output=True, text=True,
             )
@@ -59,7 +59,7 @@ class PipelineSmokeTest(unittest.TestCase):
 
             dry_output = directory / "dry-run.csv"
             dry_run = subprocess.run(
-                [sys.executable, str(ROOT / "03_match.py"), "--input", str(normalized),
+                [sys.executable, str(ROOT / "run.py"), "--input", str(normalized),
                  "--catalog", str(CATALOG), "--output", str(dry_output), "--llm-dry-run"],
                 check=True, capture_output=True, text=True,
             )
