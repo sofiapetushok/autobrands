@@ -26,7 +26,7 @@ python 01_explore.py path/to/input.csv
 python 02_normalize.py path/to/input.csv output/normalized.csv
 
 # Match against the included reference catalog
-python 03_match.py --input output/normalized.csv --catalog data/vehicle_catalog.csv --output output/matched.csv
+python run.py --input output/normalized.csv --catalog data/vehicle_catalog.csv --output output/matched.csv
 
 # Run the smoke test (generates temporary input)
 python -m unittest discover -s tests -v
@@ -63,7 +63,7 @@ The catalog is **modified and combined**, not a verbatim source dump. Make/model
 - `02_normalize.py`: normalization rules.
 - `autobrands/matching.py`: matching and fuzzy decision rules.
 - `autobrands/llm.py`: optional LLM routing (dry-run only).
-- `03_match.py`: CSV entry point; it does not implement another matcher.
+- `run.py`: CSV entry point; it does not implement another matcher.
 - `tests/`: regression verification, not runtime data.
 
 ## Project structure
@@ -72,7 +72,7 @@ The catalog is **modified and combined**, not a verbatim source dump. Make/model
 autobrands/
 |-- 01_explore.py             # Dataset profiling
 |-- 02_normalize.py           # Source-preserving normalization
-|-- 03_match.py               # CSV CLI and reporting
+|-- run.py               # CSV CLI and reporting
 |-- autobrands/
 |   |-- __init__.py
 |   |-- matching.py           # Deterministic catalog matching
