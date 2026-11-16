@@ -19,7 +19,7 @@ HERE = Path(__file__).resolve().parent.parent
 
 
 def load_phase2():
-    spec = importlib.util.spec_from_file_location("phase2_normalize", HERE / "02_normalize.py")
+    spec = importlib.util.spec_from_file_location("phase2_normalize", HERE / "normalize.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
