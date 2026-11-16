@@ -1,6 +1,6 @@
 """Phase 3: conservative make/model entity resolution over the pinned catalog.
 
-Run: python 03_match.py [--input output/claims_normalized.csv] [--catalog data/vehicle_catalog.csv]
+Run: python run.py [--input output/claims_normalized.csv] [--catalog data/vehicle_catalog.csv]
 Requires RapidFuzz. Scores are similarities, not calibrated probabilities.
 """
 
