@@ -42,18 +42,29 @@ Full accepted matches use `EXACT_MATCH`, `ALIAS_MATCH` or `FUZZY_MATCH`. Other s
 
 A similarity score is **not a calibrated probability**. The `extra_info` field preserves additional source text; it does not verify technical attributes such as fuel type. Catalog coverage and matching accuracy are separate questions, and this release does not claim independently verified real-world accuracy.
 
-## Open reference catalog
+## Reference catalog: source of truth and attribution
 
-`data/vehicle_catalog.csv` contains **14,742 reference rows**, merged and transformed from two publicly available GitHub datasets:
+The **only reference catalog** used by the default pipeline is `data/vehicle_catalog.csv` (14,742 rows). Its schema is `brand,model,vehicle_type,aliases,source`. No claims or demo input data are published.
 
-| Source | Version | Original license |
-| --- | --- | --- |
-| [VehiclesDB](https://github.com/vehiclesdb/vehiclesdb) | 2026.11.10 | CC BY 4.0 |
-| [MotorcycleName](https://github.com/ixiehao/MotorcycleName) | 1.1.1 | CC BY-SA 4.0 |
+| Upstream dataset | Version | Original license | CSV source label |
+| --- | --- | --- | --- |
+| [VehiclesDB](https://github.com/vehiclesdb/vehiclesdb) | 2026.11.10 | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | `VehiclesDB v2026.11.10` |
+| [MotorcycleName](https://github.com/ixiehao/MotorcycleName) | 1.1.1 | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) | `MotorcycleName v1.1.1` |
 
-The dataset is a modified compilation. Source records were selected, harmonized, merged and deduplicated, with alternative model names stored where available. It is not an authoritative list of all vehicles or variants.
+The catalog is **modified and combined**, not a verbatim source dump. Make/model names were selected and merged, vehicle types harmonized, overlapping entries deduplicated, and alternative names recorded in `aliases` where available. A pipe-separated `source` label indicates multiple contributing sources. The catalog does not preserve every original upstream field.
 
-**Licensing:** The Python code is MIT-licensed (`LICENSE`); the combined and modified reference catalog is documented under **CC BY-SA 4.0**, with upstream credits and applicable attribution requirements preserved. See [data/README.md](data/README.md) for full provenance, modification notes and links to upstream attribution notices.
+**Attribution:** Vehicle data by [VehiclesDB](https://vehiclesdb.com). Preserve the [VehiclesDB attribution notices](https://github.com/vehiclesdb/vehiclesdb/blob/main/ATTRIBUTION.md) and [source information](https://github.com/vehiclesdb/vehiclesdb/blob/main/SOURCES.md), including applicable underlying official-register notices. Motorcycle names from [MotorcycleName](https://github.com/ixiehao/MotorcycleName).
+
+**Licensing:** Python source code is MIT-licensed (`LICENSE`). The transformed combined catalog is separately distributed under **CC BY-SA 4.0** with attribution to both sources and notices of changes; upstream CC BY 4.0 notices remain applicable. Third-party trademarks remain with their owners.
+
+### One source of truth per concern
+
+- `data/vehicle_catalog.csv`: make/model reference records.
+- `02_normalize.py`: normalization rules.
+- `autobrands/matching.py`: matching and fuzzy decision rules.
+- `autobrands/llm.py`: optional LLM routing (dry-run only).
+- `03_match.py`: CSV entry point; it does not implement another matcher.
+- `tests/`: regression verification, not runtime data.
 
 ## Project structure
 
@@ -68,7 +79,6 @@ autobrands/
 |   `-- llm.py                # Optional routing, validation and caching
 |-- data/
 |   |-- vehicle_catalog.csv   # Open, attributed reference catalog
-|   `-- README.md             # Sources and licensing
 |-- tests/
 |   |-- test_matching.py      # Matching regression tests
 |   |-- test_refactoring.py   # Original decision snapshots and module checks
