@@ -20,10 +20,10 @@ Requires Python 3.10+.
 python -m pip install -r requirements.txt
 
 # Inspect a local CSV
-python 01_explore.py path/to/input.csv
+python explore.py path/to/input.csv
 
 # Normalize your own input
-python 02_normalize.py path/to/input.csv output/normalized.csv
+python normalize.py path/to/input.csv output/normalized.csv
 
 # Match against the included reference catalog
 python run.py --input output/normalized.csv --catalog data/vehicle_catalog.csv --output output/matched.csv
@@ -60,7 +60,7 @@ The catalog is **modified and combined**, not a verbatim source dump. Make/model
 ### One source of truth per concern
 
 - `data/vehicle_catalog.csv`: make/model reference records.
-- `02_normalize.py`: normalization rules.
+- `normalize.py`: normalization rules.
 - `autobrands/matching.py`: matching and fuzzy decision rules.
 - `autobrands/llm.py`: optional LLM routing (dry-run only).
 - `run.py`: CSV entry point; it does not implement another matcher.
@@ -70,8 +70,8 @@ The catalog is **modified and combined**, not a verbatim source dump. Make/model
 
 ```text
 autobrands/
-|-- 01_explore.py             # Dataset profiling
-|-- 02_normalize.py           # Source-preserving normalization
+|-- explore.py             # Dataset profiling
+|-- normalize.py           # Source-preserving normalization
 |-- run.py               # CSV CLI and reporting
 |-- autobrands/
 |   |-- __init__.py
