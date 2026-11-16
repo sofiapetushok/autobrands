@@ -17,9 +17,9 @@ from pathlib import Path
 DIRECTORY = Path(__file__).resolve().parent
 DEFAULT_INPUT = DIRECTORY / "data" / "claims_raw.csv"
 DEFAULT_OUTPUT = DIRECTORY / "output" / "claims_normalized.csv"
-INPUT_COLUMNS = ("claim_id", "brand", "model")
+INPUT_COLUMNS = ("brand", "model")
 OUTPUT_COLUMNS = (
-    "claim_id", "brand_raw", "model_raw", "brand_normalized",
+    "brand_raw", "model_raw", "brand_normalized",
     "model_normalized", "brand_latin", "model_latin",
     "brand_missing", "model_missing", "quality_flags",
 )
@@ -187,7 +187,6 @@ def normalize_row(row: dict[str, str]) -> dict[str, str]:
     brand = normalize_text(row["brand"])
     model = normalize_text(row["model"])
     return {
-        "claim_id": row["claim_id"],
         "brand_raw": row["brand"],
         "model_raw": row["model"],
         "brand_normalized": brand or "",

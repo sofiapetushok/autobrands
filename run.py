@@ -20,7 +20,7 @@ CATALOG = HERE / "data" / "vehicle_catalog.csv"
 BRAND_ALIASES = None
 OUTPUT = HERE / "output" / "claims_matched.csv"
 OUTPUT_COLUMNS = (
-    "claim_id", "brand_raw", "model_raw", "brand_normalized", "model_normalized",
+    "brand_raw", "model_raw", "brand_normalized", "model_normalized",
     "brand_missing", "model_missing",
     "corrected_brand", "corrected_model", "vehicle_type", "match_status",
     "match_method", "match_score", "confidence_level", "candidate_count",
@@ -47,10 +47,7 @@ def run(input_path: Path, catalog_path: Path, aliases_path: Path | None, output_
     if output_path.resolve() in paths:
         raise ValueError("Output must differ from input, catalog, and alias paths")
     started = time.perf_counter()
-    rows = read_csv(input_path, set(OUTPUT_COLUMNS[:7]) | {"quality_flags"})
-    ids = [row["claim_id"] for row in rows]
-    if len(set(ids)) != len(ids) or any(not value.strip() for value in ids):
-        raise ValueError("Claim IDs must be nonempty and unique")
+    rows = read_csv(input_path, set(OUTPUT_COLUMNS[:6]) | {"quality_flags"})
     catalog_rows = read_csv(catalog_path, {"brand", "model", "vehicle_type", "aliases", "source"})
     alias_rows = read_csv(aliases_path, {"brand", "alias"}) if aliases_path is not None else []
     matcher = Matcher(catalog_rows, alias_rows, min_score, min_margin, min_brand, min_model)
@@ -72,7 +69,7 @@ def run(input_path: Path, catalog_path: Path, aliases_path: Path | None, output_
                     cache[key] = matcher.resolve(*key, brand_latin=row.get("brand_latin"),
                                                  model_latin=row.get("model_latin"))
                 decision = cache[key]
-                result = {name: row[name] for name in OUTPUT_COLUMNS[:7]}
+                result = {name: row[name] for name in OUTPUT_COLUMNS[:6]}
                 result.update({
                     "corrected_brand": decision.corrected_brand,
                     "corrected_model": decision.corrected_model,

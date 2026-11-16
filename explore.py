@@ -38,7 +38,7 @@ def main(path):
         raise SystemExit(f'CSV not found: {path}')
     with path.open('r', encoding='utf-8-sig', newline='') as f:
         reader = csv.DictReader(f)
-        required = {'claim_id', 'brand', 'model'}
+        required = {'brand', 'model'}
         if not required.issubset(reader.fieldnames or []):
             raise SystemExit(f'Missing columns: {required - set(reader.fieldnames or [])}')
         rows = list(reader)
@@ -51,14 +51,11 @@ def main(path):
     missing_both = missing_brand = missing_model = 0
     mixed_script = noisy = digits = long_values = 0
     brand_contains_space = model_contains_space = 0
-    ids = Counter()
     lengths = Counter()
 
     for row in rows:
-        claim_id = norm(row['claim_id'])
         brand, model = norm(row['brand']), norm(row['model'])
         bm, mm = is_missing(brand), is_missing(model)
-        ids[claim_id] += 1
         raw_pairs[(brand, model)] += 1
         normalized_pairs[(brand.casefold(), model.casefold())] += 1
         if bm: missing_brand += 1
@@ -78,8 +75,6 @@ def main(path):
     print(f'\nVEHICLE CLAIMS DATA PROFILING\nFile: {path.name}')
     print('=' * 60)
     print(f'Rows: {count:,}')
-    print(f'Unique claim IDs: {len(ids):,}')
-    print(f'Duplicate claim IDs: {sum(n-1 for n in ids.values() if n > 1):,}')
     print(f'Unique raw brand/model pairs: {len(raw_pairs):,}')
     print(f'Unique case-folded pairs: {len(normalized_pairs):,}')
     print(f'Repeated rows by brand/model: {count-len(raw_pairs):,}')

@@ -31,7 +31,7 @@ python run.py --input output/normalized.csv --catalog data/vehicle_catalog.csv -
 python -m unittest discover -s tests -v
 ```
 
-Input CSV columns: `claim_id,brand,model`. The catalog columns are `brand,model,vehicle_type,aliases,source`.
+Input CSV columns: `brand,model`. No record identifier is required or included in output. Input row order and duplicate rows are preserved. The catalog columns are `brand,model,vehicle_type,aliases,source`.
 
 **No input records, claims dataset, or synthetic claims CSV is included in this repository.** Bring your own input file. The smoke test generates its input in a temporary directory. Generated outputs and local inputs are not intended for version control.
 

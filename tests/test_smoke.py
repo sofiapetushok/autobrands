@@ -27,13 +27,12 @@ class PipelineSmokeTest(unittest.TestCase):
             matched = directory / "matched.csv"
 
             with raw.open("w", encoding="utf-8", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=["claim_id", "brand", "model"])
+                writer = csv.DictWriter(stream, fieldnames=["brand", "model"])
                 writer.writeheader()
-                writer.writerow({
-                    "claim_id": "TEMP-001",
+                writer.writerows([{
                     "brand": candidate["brand"],
                     "model": candidate["model"],
-                })
+                }] * 2)
 
             subprocess.run(
                 [sys.executable, str(ROOT / "explore.py"), str(raw)],
@@ -51,8 +50,11 @@ class PipelineSmokeTest(unittest.TestCase):
             with matched.open(encoding="utf-8-sig", newline="") as stream:
                 results = list(csv.DictReader(stream))
 
-            self.assertEqual(len(results), 1)
-            self.assertEqual(results[0]["claim_id"], "TEMP-001")
+            self.assertEqual(len(results), 2)
+            self.assertNotIn("claim_id", results[0])
+            self.assertEqual(results[0], results[1])
+            with normalized.open(encoding="utf-8", newline="") as stream:
+                self.assertNotIn("claim_id", csv.DictReader(stream).fieldnames)
             self.assertIn("match_status", results[0])
             self.assertIn("extra_info", results[0])
             self.assertIn("brand_latin", results[0])
