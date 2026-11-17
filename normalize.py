@@ -38,6 +38,7 @@ QUOTES = dict.fromkeys(map(ord, "‘’‚‛`´"), "'")
 QUOTES.update(dict.fromkeys(map(ord, "“”„‟"), '"'))
 # These punctuation marks can occur in vehicle names or specifications.
 COMMON_PUNCTUATION = frozenset("-./+&'(),:")
+MAX_COMPARISON_TEXTS = 8
 
 
 def strip_greek_diacritics(value: str) -> str:
@@ -176,7 +177,7 @@ def _phonetic_latin_text(value: str) -> str:
 
 
 def _visual_mixed_text(value: str) -> str:
-    """Use visual Greek/Latin equivalences inside a Latin-dominant segment."""
+    """Render Greek confusables visually and other Greek letters phonetically."""
     return "".join(
         LATIN_DOMINANT_CONFUSABLES.get(char, GREEK_LETTERS.get(char, char))
         for char in value
@@ -224,11 +225,12 @@ def latin_comparison_text(value: str | None) -> str | None:
 
 
 def comparison_texts(value: str | None) -> tuple[str, ...]:
-    """Return deterministic visual and phonetic comparison alternatives.
+    """Return bounded, deterministic Greek/Latin comparison interpretations.
 
-    The normalized input is never changed. Latin-dominant mixed-script text
-    uses the visual interpretation first; a distinct Greek phonetic rendering
-    is exposed as an alternative instead of silently replacing the source.
+    Normalized output remains the first choice. Phonetic and visual readings
+    are added as alternatives, with at most ``MAX_COMPARISON_TEXTS`` results.
+    Mixed readings vary one whitespace-delimited Greek-containing segment at a
+    time; they do not enumerate character-level combinations.
     """
     if value is None:
         return ()
@@ -236,10 +238,48 @@ def comparison_texts(value: str | None) -> tuple[str, ...]:
     latin, greek = _script_counts(formatted)
     if latin and not greek:
         return (formatted,)
+    pieces = re.findall(r"\s+|\S+", formatted)
     primary = _latin_normalized_text(formatted)
-    comparison = latin_comparison_text(formatted)
     phonetic = _phonetic_latin_text(formatted)
-    return tuple(dict.fromkeys((primary, comparison, phonetic)))
+    visual = "".join(
+        piece if piece.isspace() else _visual_mixed_text(piece)
+        for piece in pieces
+    )
+    alternatives = []
+
+    def add(candidate):
+        if candidate not in alternatives and len(alternatives) < MAX_COMPARISON_TEXTS:
+            alternatives.append(candidate)
+
+    add(primary)
+    add(phonetic)
+    add(visual)
+
+    greek_segments = [i for i, piece in enumerate(pieces)
+                      if not piece.isspace() and _script_counts(piece)[1]]
+    # Mix one segment's visual reading into a phonetic baseline, then one
+    # segment's phonetic reading into a visual baseline. The cap bounds work
+    # even for inputs containing many script-mixed words.
+    for baseline, replacement in (("phonetic", "visual"), ("visual", "phonetic")):
+        for index in greek_segments:
+            if len(alternatives) >= MAX_COMPARISON_TEXTS:
+                break
+            transformed = []
+            for piece in pieces:
+                if piece.isspace():
+                    transformed.append(piece)
+                elif baseline == "phonetic":
+                    transformed.append(_phonetic_latin_text(piece))
+                else:
+                    transformed.append(_visual_mixed_text(piece))
+            transformed[index] = (
+                _visual_mixed_text(pieces[index]) if replacement == "visual"
+                else _phonetic_latin_text(pieces[index])
+            )
+            add("".join(transformed))
+        if len(alternatives) >= MAX_COMPARISON_TEXTS:
+            break
+    return tuple(alternatives)
 
 
 def has_mixed_greek_latin(value: str) -> bool:

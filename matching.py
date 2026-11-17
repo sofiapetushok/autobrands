@@ -19,6 +19,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import DamerauLevenshtein
@@ -85,6 +86,77 @@ def brand_similarity(query: str, choice: str) -> float:
     # forms, but retain edit distance and an independent model requirement.
     return max(fuzz.ratio(left, right),
                fuzz.ratio(phonetic_fold(left), phonetic_fold(right)))
+
+# Cost units are normalized by the longer string length. Unicode equivalence
+# changes candidate evidence only; existing acceptance thresholds remain in force.
+UNICODE_MATCH_COSTS = {
+    "exact": 0.0,
+    "visual_mixed": 0.01,
+    "visual_greek": 0.04,
+    "phonetic_mixed": 0.35,
+    "phonetic_greek": 0.02,
+    "edit": 1.0,
+}
+
+def _has_greek(value: str | None) -> bool:
+    return bool(value) and any(
+        unicodedata.name(char, "").startswith("GREEK ") for char in value
+    )
+
+@lru_cache(maxsize=32768)
+def unicode_weighted_similarity(query: str, choice: str) -> float:
+    """Compare original Unicode text to a Latin catalog form with weighted edits.
+
+    Greek letters and configured digraphs are traversed as DP edges, so visual
+    and phonetic readings are compared without expanding strings combinatorially.
+    Punctuation, spaces, and numbers remain ordinary identity-bearing characters.
+    """
+    source = normalize._normalize_format(query)
+    target = normalize._normalize_format(choice)
+    if not source or not target or not _has_greek(source):
+        return 0.0
+    latin_count = sum(unicodedata.name(ch, "").startswith("LATIN ") for ch in source)
+    greek_count = sum(unicodedata.name(ch, "").startswith("GREEK ") for ch in source)
+    mixed = bool(latin_count and greek_count)
+    visual_cost = UNICODE_MATCH_COSTS["visual_mixed" if mixed else "visual_greek"]
+    phonetic_cost = UNICODE_MATCH_COSTS["phonetic_mixed" if mixed else "phonetic_greek"]
+    n, m = len(source), len(target)
+    dp = [[float("inf")] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = 0.0
+    for i in range(n + 1):
+        for j in range(m + 1):
+            current = dp[i][j]
+            if current == float("inf"):
+                continue
+            if i < n:
+                dp[i + 1][j] = min(dp[i + 1][j], current + UNICODE_MATCH_COSTS["edit"])
+            if j < m:
+                dp[i][j + 1] = min(dp[i][j + 1], current + UNICODE_MATCH_COSTS["edit"])
+            if i < n and j < m:
+                substitution = UNICODE_MATCH_COSTS["exact"] if source[i] == target[j] else UNICODE_MATCH_COSTS["edit"]
+                dp[i + 1][j + 1] = min(dp[i + 1][j + 1], current + substitution)
+            if i >= n:
+                continue
+
+            # A Greek character can emit both its visual and phonetic forms.
+            char = source[i]
+            if unicodedata.name(char, "").startswith("GREEK "):
+                visual = normalize.LATIN_DOMINANT_CONFUSABLES.get(char)
+                phonetic = normalize.GREEK_LETTERS.get(char)
+                for rendered, cost in ((visual, visual_cost), (phonetic, phonetic_cost)):
+                    if rendered and target.startswith(rendered, j):
+                        dp[i + 1][j + len(rendered)] = min(
+                            dp[i + 1][j + len(rendered)], current + cost
+                        )
+
+            # Digraphs are one-to-many or many-to-one weighted transitions.
+            for greek, rendered in normalize.GREEK_DIGRAPHS:
+                if source.startswith(greek, i) and target.startswith(rendered, j):
+                    dp[i + len(greek)][j + len(rendered)] = min(
+                        dp[i + len(greek)][j + len(rendered)], current + phonetic_cost
+                    )
+    distance = dp[n][m]
+    return round(max(0.0, 100.0 * (1.0 - distance / max(n, m))), 1)
 
 
 def numeric_signature(value: str) -> tuple[str, ...]:
@@ -155,6 +227,7 @@ class Matcher:
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
             raise ValueError("top_k must be a positive integer")
         self.top_k = top_k
+        self._unicode_candidate_cache = {}
         self.min_score = min_score
         self.min_margin = min_margin
         self.min_brand = min_brand
@@ -916,8 +989,60 @@ class Matcher:
                     candidates.update(self.model_choices_by_brand[candidate_brand][choices[choice]])
         return candidates
 
+    def _unicode_brand_candidates(self, raw_brand: str) -> tuple[str, ...]:
+        """Retrieve a bounded brand set from existing indexes and interpretations."""
+        candidates = set()
+        for value in normalize.comparison_texts(raw_brand):
+            query = latin_fold(value)
+            for choice, _, _ in process.extract(
+                    query, self.brand_folded_strings, scorer=fuzz.ratio,
+                    limit=16, score_cutoff=45):
+                candidates.update(self.brand_folded.get(choice, ()))
+        return tuple(sorted(candidates))
+
+    def _unicode_candidate_ids(self, brand: str, model: str,
+                               raw_brand: str | None, raw_model: str | None) -> set[int]:
+        """Retrieve from bounded existing indexes using raw Unicode alternatives."""
+        if not (_has_greek(raw_brand) or _has_greek(raw_model)):
+            return self._candidate_ids(brand, model)
+        cache_key = (brand, model, raw_brand or "", raw_model or "")
+        cached = self._unicode_candidate_cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
+        brand_forms = tuple(dict.fromkeys(
+            norm(value) for value in normalize.comparison_texts(raw_brand)
+            if norm(value)
+        )) if _has_greek(raw_brand) else (brand,)
+        model_forms = tuple(dict.fromkeys(
+            norm(value) for value in normalize.comparison_texts(raw_model)
+            if norm(value)
+        )) if _has_greek(raw_model) else (model,)
+        pairs = [(brand, model)]
+        pairs.extend((form, model) for form in brand_forms if form != brand)
+        pairs.extend((brand, form) for form in model_forms if form != model)
+        # Include a bounded cross-product when both fields contain Greek.
+        if _has_greek(raw_brand) and _has_greek(raw_model):
+            pairs.extend((brand_form, model_form)
+                         for brand_form in brand_forms for model_form in model_forms)
+        candidates = set()
+        seen = set()
+        for query_brand, query_model in pairs:
+            key = (query_brand, query_model)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.update(self._candidate_ids(query_brand, query_model))
+            if len(seen) >= 32:
+                break
+        if len(self._unicode_candidate_cache) >= 2048:
+            self._unicode_candidate_cache.clear()
+        self._unicode_candidate_cache[cache_key] = frozenset(candidates)
+        return candidates
+
     def _rank(self, brand: str, model: str, ids: set[int],
-              brand_latin: str | None = None, model_latin: str | None = None) -> list[Ranked]:
+              brand_latin: str | None = None, model_latin: str | None = None,
+              unicode_brand: str | None = None, unicode_model: str | None = None,
+              unicode_alternatives: bool = False) -> list[Ranked]:
         brand_key, brand_alias = self.brand_key(brand)
         ranked = []
         for identity_id in ids:
@@ -925,22 +1050,36 @@ class Matcher:
             variants = tuple(dict.fromkeys(
                 (*identity.variants, *self.model_comparison_variants.get(identity_id, ()))
             ))
-            if brand_key:
+            if brand_key and not (unicode_alternatives and _has_greek(unicode_brand)):
                 brand_score = 100.0 if identity.brand_key == brand_key else 0.0
             elif brand:
                 # WRatio treats a one-letter prefix as a near-perfect brand.
                 # Plain edit ratio is safer for automatic brand correction.
-                brand_score = max(brand_similarity(brand, identity.brand_key),
-                                  brand_similarity(brand_latin or brand, identity.brand_key))
+                if unicode_alternatives and _has_greek(unicode_brand):
+                    brand_score = unicode_weighted_similarity(unicode_brand, identity.brand_key)
+                else:
+                    brand_score = max(
+                        brand_similarity(brand, identity.brand_key),
+                        brand_similarity(brand_latin or brand, identity.brand_key),
+                        unicode_weighted_similarity(unicode_brand, identity.brand_key)
+                        if _has_greek(unicode_brand) else 0.0,
+                    )
             else:
                 brand_score = 0.0
-            model_score = max((self._model_similarity(model, variant)
-                               for variant in variants), default=0.0)
-            if model_latin is not None:
-                model_score = max(model_score, max((self._model_similarity(
-                    model_latin, variant)
-                    for variant in variants), default=0.0))
-            if brand_key and identity.brand_key != brand_key:
+            if unicode_alternatives and _has_greek(unicode_model):
+                model_score = max((unicode_weighted_similarity(unicode_model, variant)
+                                   for variant in variants), default=0.0)
+            else:
+                model_score = max((self._model_similarity(model, variant)
+                                   for variant in variants), default=0.0)
+                if model_latin is not None:
+                    model_score = max(model_score, max((self._model_similarity(
+                        model_latin, variant)
+                        for variant in variants), default=0.0))
+                if _has_greek(unicode_model):
+                    model_score = max(model_score, max((unicode_weighted_similarity(
+                        unicode_model, variant) for variant in variants), default=0.0))
+            if brand_key and identity.brand_key != brand_key and not unicode_alternatives:
                 continue
             if brand:
                 score = 0.30 * brand_score + 0.70 * model_score
@@ -983,6 +1122,16 @@ class Matcher:
         decision = self._resolve(stripped if strip_brand_slash else brand_value, model_value,
                                  brand_latin=None if strip_brand_slash else brand_latin,
                                  model_latin=model_latin)
+        unicode_acceptance = decision.match_status in {"EXACT_MATCH", "ALIAS_MATCH", "FUZZY_MATCH"}
+        unicode_brand_only = (decision.match_status == "PARTIAL_MATCH"
+                              and bool(brand_value) and not model)
+        unicode_model_only_partial = (decision.match_status == "PARTIAL_MATCH"
+                                      and not brand_value and bool(model))
+        if ((_has_greek(brand_value) or _has_greek(model_value))
+                and (unicode_acceptance or unicode_brand_only or unicode_model_only_partial)):
+            decision = self._unicode_acceptance_guard(
+                decision, brand_value, model_value, brand, model, brand_latin, model_latin
+            )
         if decision.match_status in {"EXACT_MATCH", "ALIAS_MATCH", "FUZZY_MATCH"}:
             identity = self.identities[self.by_pair[(norm(decision.corrected_brand), norm(decision.corrected_model))]]
             observed = punctuation_signature(
@@ -1024,6 +1173,66 @@ class Matcher:
             corrected_brand=normalize.normalize_text(decision.corrected_brand) or "",
             corrected_model=normalize.normalize_text(decision.corrected_model) or "",
         )
+
+    def _unicode_acceptance_guard(self, decision: Decision, raw_brand: str | None,
+                                  raw_model: str | None, brand: str, model: str,
+                                  brand_latin: str | None, model_latin: str | None) -> Decision:
+        """Abstain when weighted Unicode evidence conflicts with an apparent match."""
+        verified_alias_methods = {
+            "EXPLICIT_ALIAS", "FOLDED_EXPLICIT_ALIAS", "MODEL_ONLY_ALIAS",
+            "CATALOG_ALIAS_VARIANT_CONTEXT",
+        }
+        if decision.match_method in verified_alias_methods:
+            return decision
+
+        if raw_brand and not model:
+            ranks = []
+            brand_candidates = set(self._unicode_brand_candidates(raw_brand))
+            accepted_brand = norm(decision.corrected_brand)
+            if accepted_brand in self.brands:
+                brand_candidates.add(accepted_brand)
+            for candidate_brand in sorted(brand_candidates):
+                score = unicode_weighted_similarity(raw_brand, candidate_brand)
+                representative = min(
+                    self.by_brand[candidate_brand],
+                    key=lambda identity_id: self.identities[identity_id].model_key,
+                )
+                ranks.append(Ranked(representative, score, score, 0.0, "unicode_brand"))
+            ranks.sort(key=lambda item: (-item.score,
+                                         self.identities[item.identity_id].brand_key))
+            if not ranks or ranks[0].score < self.min_brand:
+                return self.suggestion("AMBIGUOUS", "UNICODE_BRAND_INSUFFICIENT", ranks)
+            expected_brand = norm(decision.corrected_brand)
+            winner = self.identities[ranks[0].identity_id].brand_key
+            margin = ranks[0].score - (ranks[1].score if len(ranks) > 1 else 0.0)
+            if expected_brand != winner or margin < self.min_margin:
+                return self.suggestion("AMBIGUOUS", "UNICODE_BRAND_COMPETITION", ranks)
+            return decision
+
+        candidate_ids = self._unicode_candidate_ids(brand, model, raw_brand, raw_model)
+        if decision.corrected_brand and decision.corrected_model:
+            accepted_id = self.by_pair.get((norm(decision.corrected_brand),
+                                            norm(decision.corrected_model)))
+            if accepted_id is not None:
+                candidate_ids.add(accepted_id)
+        ranks = self._rank(
+            brand, model, candidate_ids, brand_latin, model_latin,
+            unicode_brand=raw_brand, unicode_model=raw_model,
+            unicode_alternatives=True,
+        )
+        if not ranks or ranks[0].score < self.min_score:
+            return self.suggestion("AMBIGUOUS", "UNICODE_IDENTITY_INSUFFICIENT", ranks)
+        expected_brand = norm(decision.corrected_brand)
+        margin = ranks[0].score - (ranks[1].score if len(ranks) > 1 else 0.0)
+        if decision.match_status == "PARTIAL_MATCH" and not raw_brand and expected_brand:
+            winner_brand = self.identities[ranks[0].identity_id].brand_key
+            if winner_brand != expected_brand or margin < self.min_margin:
+                return self.suggestion("AMBIGUOUS", "UNICODE_BRAND_CONSENSUS", ranks)
+            return decision
+        expected_id = self.by_pair.get((expected_brand, norm(decision.corrected_model)))
+        if ranks[0].identity_id != expected_id or margin < self.min_margin:
+            return self.suggestion("AMBIGUOUS", "UNICODE_IDENTITY_COMPETITION", ranks)
+        return decision
 
     def _resolve(self, brand_value: str | None, model_value: str | None, *,
                  brand_latin: str | None = None, model_latin: str | None = None) -> Decision:
@@ -1081,10 +1290,13 @@ class Matcher:
         if not brand and len(compact(model)) >= 3 and any(c.isalpha() for c in model):
             model_ids = (self.exact_model_ids(model) |
                          self.folded_model_lookup.get(latin_fold(model_latin), set()))
-            candidate_ids = model_ids | self._candidate_ids("", model)
+            candidate_ids = model_ids | self._unicode_candidate_ids(
+                "", model, None, model_value
+            )
             if model_latin and model_latin != model:
                 candidate_ids |= self._candidate_ids("", model_latin)
-            ranked = self._rank("", model, candidate_ids, model_latin=model_latin)
+            ranked = self._rank("", model, candidate_ids, model_latin=model_latin,
+                                unicode_model=model_value)
             if not ranked:
                 return Decision()
 
@@ -1170,8 +1382,14 @@ class Matcher:
 
             comparisons = tuple(dict.fromkeys((brand, brand_latin)))
             brand_ranks = []
-            for candidate_brand in self.brands:
-                score = max(brand_similarity(query, candidate_brand) for query in comparisons)
+            brand_candidates = (self._unicode_brand_candidates(brand_value)
+                                if _has_greek(brand_value) else tuple(self.brands))
+            for candidate_brand in brand_candidates:
+                score = max(
+                    *(brand_similarity(query, candidate_brand) for query in comparisons),
+                    unicode_weighted_similarity(brand_value, candidate_brand)
+                    if _has_greek(brand_value) else 0.0,
+                )
                 representative = min(
                     self.by_brand[candidate_brand],
                     key=lambda identity_id: self.identities[identity_id].model_key,
@@ -1207,12 +1425,15 @@ class Matcher:
                                 match_score="100.0", confidence_level="LOW")
             return Decision()
 
-        candidate_ids = self._candidate_ids(brand, model)
+        candidate_ids = self._unicode_candidate_ids(
+            brand, model, brand_value, model_value
+        )
         if model_latin and model_latin != model:
             candidate_ids |= self._candidate_ids(brand, model_latin)
         if (brand_latin, model_latin) != (brand, model):
             candidate_ids |= self._candidate_ids(brand_latin, model_latin)
-        candidates = self._rank(brand, model, candidate_ids, brand_latin, model_latin)
+        candidates = self._rank(brand, model, candidate_ids, brand_latin, model_latin,
+                                unicode_brand=brand_value, unicode_model=model_value)
         if not candidates:
             if brand_key:
                 return Decision(corrected_brand=self.brand_choices[brand_key],
