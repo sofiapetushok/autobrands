@@ -111,6 +111,15 @@ def _normalize_text_with_keys(value: str | None, missing_keys: frozenset[str]) -
     if not isinstance(value, str):
         raise TypeError("normalize_text expects a string or None")
     text = _normalize_format(value)
+    return None if text in missing_keys else _latin_normalized_text(text)
+
+
+def _formatted_text_with_keys(value: str | None, missing_keys: frozenset[str]) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("normalize_text expects a string or None")
+    text = _normalize_format(value)
     return None if text in missing_keys else text
 
 
@@ -137,7 +146,55 @@ LATIN_DOMINANT_CONFUSABLES = {
     "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O",
     "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
 }
-WORD_TOKEN = re.compile(r"[^\W_]+|_+|[^\w]", flags=re.UNICODE)
+
+
+def _script_counts(value: str) -> tuple[int, int]:
+    """Return Latin and Greek letter counts without guessing language."""
+    latin = greek = 0
+    for char in value:
+        name = unicodedata.name(char, "")
+        latin += name.startswith("LATIN ")
+        greek += name.startswith("GREEK ")
+    return latin, greek
+
+
+def _phonetic_latin_text(value: str) -> str:
+    """Transliterate Greek text phonetically while preserving other content."""
+    result = []
+    i = 0
+    while i < len(value):
+        pair = value[i:i + 2]
+        folded = next((replacement for source, replacement in GREEK_DIGRAPHS
+                       if pair == source), None)
+        if folded is not None:
+            result.append(folded)
+            i += 2
+        else:
+            result.append(GREEK_LETTERS.get(value[i], value[i]))
+            i += 1
+    return "".join(result)
+
+
+def _visual_mixed_text(value: str) -> str:
+    """Use visual Greek/Latin equivalences inside a Latin-dominant segment."""
+    return "".join(
+        LATIN_DOMINANT_CONFUSABLES.get(char, GREEK_LETTERS.get(char, char))
+        for char in value
+    )
+
+
+def _latin_normalized_text(value: str) -> str:
+    """Normalize Greek/Latin text to a stable Latin-only representation."""
+    pieces = []
+    for segment in re.findall(r"\s+|\S+", value):
+        latin, greek = _script_counts(segment)
+        if greek and latin >= 2 and latin > greek:
+            pieces.append(_visual_mixed_text(segment))
+        else:
+            # Letter-wise transliteration keeps Υ as Y, which also preserves
+            # common Latin spellings such as ΤΟΥΟΤΑ -> TOYOTA.
+            pieces.append("".join(GREEK_LETTERS.get(char, char) for char in segment))
+    return "".join(pieces)
 
 
 def latin_comparison_text(value: str | None) -> str | None:
@@ -149,38 +206,45 @@ def latin_comparison_text(value: str | None) -> str | None:
     """
     if value is None:
         return None
+    value = _normalize_format(value)
+    latin, greek = _script_counts(value)
+    if latin and not greek:
+        return value
     pieces = []
-    for match in WORD_TOKEN.finditer(value):
-        token = match.group()
-        latin = sum(unicodedata.name(c, "").startswith("LATIN ") for c in token)
-        greek = sum(unicodedata.name(c, "").startswith("GREEK ") for c in token)
-        if latin >= 2 and latin > greek:
-            pieces.append("".join(LATIN_DOMINANT_CONFUSABLES.get(c, GREEK_LETTERS.get(c, c)) for c in token))
-            continue
-        result = []
-        i = 0
-        while i < len(token):
-            pair = token[i:i + 2]
-            folded = next((replacement for source, replacement in GREEK_DIGRAPHS if pair == source), None)
-            if folded is not None:
-                result.append(folded)
-                i += 2
-            else:
-                result.append(GREEK_LETTERS.get(token[i], token[i]))
-                i += 1
-        pieces.append("".join(result))
+    # Whitespace separates words. Punctuation inside a non-space segment is
+    # retained and participates in the same script context, so a visual Greek
+    # suffix in MERCEDES-ΒΕΝ is not mistaken for an independent Greek word.
+    for segment in re.findall(r"\s+|\S+", value):
+        latin, greek = _script_counts(segment)
+        if greek and latin >= 2 and latin > greek:
+            pieces.append(_visual_mixed_text(segment))
+        else:
+            pieces.append(_phonetic_latin_text(segment))
     return "".join(pieces)
 
 
+def comparison_texts(value: str | None) -> tuple[str, ...]:
+    """Return deterministic visual and phonetic comparison alternatives.
+
+    The normalized input is never changed. Latin-dominant mixed-script text
+    uses the visual interpretation first; a distinct Greek phonetic rendering
+    is exposed as an alternative instead of silently replacing the source.
+    """
+    if value is None:
+        return ()
+    formatted = _normalize_format(value)
+    latin, greek = _script_counts(formatted)
+    if latin and not greek:
+        return (formatted,)
+    primary = _latin_normalized_text(formatted)
+    comparison = latin_comparison_text(formatted)
+    phonetic = _phonetic_latin_text(formatted)
+    return tuple(dict.fromkeys((primary, comparison, phonetic)))
+
+
 def has_mixed_greek_latin(value: str) -> bool:
-    greek = latin = False
-    for char in value:
-        if not char.isalpha():
-            continue
-        name = unicodedata.name(char, "")
-        greek |= name.startswith("GREEK ")
-        latin |= name.startswith("LATIN ")
-    return greek and latin
+    latin, greek = _script_counts(value)
+    return bool(latin and greek)
 
 
 def has_unusual_symbols(value: str, *, allowed_punctuation=None) -> bool:
@@ -240,6 +304,8 @@ def quality_flags(brand: str | None, model: str | None, *,
 def normalize_row(row: dict[str, str], *, missing_tokens=None,
                   allowed_punctuation=None) -> dict[str, str]:
     missing_keys = _missing_keys(missing_tokens)
+    brand_formatted = _formatted_text_with_keys(row["brand"], missing_keys)
+    model_formatted = _formatted_text_with_keys(row["model"], missing_keys)
     brand = _normalize_text_with_keys(row["brand"], missing_keys)
     model = _normalize_text_with_keys(row["model"], missing_keys)
     return {
@@ -247,11 +313,12 @@ def normalize_row(row: dict[str, str], *, missing_tokens=None,
         "model_raw": row["model"],
         "brand_normalized": brand or "",
         "model_normalized": model or "",
-        "brand_latin": latin_comparison_text(brand) or "",
-        "model_latin": latin_comparison_text(model) or "",
+        "brand_latin": latin_comparison_text(brand_formatted) or "",
+        "model_latin": latin_comparison_text(model_formatted) or "",
         "brand_missing": str(brand is None).lower(),
         "model_missing": str(model is None).lower(),
-        "quality_flags": "|".join(quality_flags(brand, model, allowed_punctuation=allowed_punctuation)),
+        "quality_flags": "|".join(quality_flags(
+            brand_formatted, model_formatted, allowed_punctuation=allowed_punctuation)),
     }
 
 
@@ -320,12 +387,19 @@ def normalize_dataframe(df, *, brand_col: str, model_col: str, prefix: str = "ab
     # Iterate directly over columns rather than relying on index alignment:
     # duplicate index labels must not duplicate or reorder records.
     for brand_input, model_input in zip(df[brand_col], df[model_col]):
-        brand = _normalize_text_with_keys(coerce(brand_input, brand_col), missing_keys)
-        model = _normalize_text_with_keys(coerce(model_input, model_col), missing_keys)
+        raw_brand = coerce(brand_input, brand_col)
+        raw_model = coerce(model_input, model_col)
+        brand_formatted = _formatted_text_with_keys(raw_brand, missing_keys)
+        model_formatted = _formatted_text_with_keys(raw_model, missing_keys)
+        brand = _normalize_text_with_keys(raw_brand, missing_keys)
+        model = _normalize_text_with_keys(raw_model, missing_keys)
         processed.append((
             brand or "", model or "",
-            latin_comparison_text(brand) or "", latin_comparison_text(model) or "",
-            brand is None, model is None, "|".join(quality_flags(brand, model, allowed_punctuation=allowed_chars)),
+            latin_comparison_text(brand_formatted) or "",
+            latin_comparison_text(model_formatted) or "",
+            brand is None, model is None,
+            "|".join(quality_flags(brand_formatted, model_formatted,
+                                   allowed_punctuation=allowed_chars)),
         ))
 
     result = df.copy()
