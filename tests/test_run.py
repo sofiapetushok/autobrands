@@ -21,7 +21,7 @@ class MatchingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         catalog = module.read_csv(HERE / "data" / "vehicle_catalog.csv",
-                                  {"brand", "model", "vehicle_type", "aliases", "source"})
+                                  {"brand", "model", "vehicle_type", "aliases"})
         cls.matcher = module.Matcher(catalog)
 
     def resolve(self, brand, model):
@@ -165,7 +165,7 @@ class MatchingTests(unittest.TestCase):
         # and claims. The engine must construct every candidate from this input.
         catalog = [
             {"brand": brand, "model": model, "vehicle_type": "motorcycle",
-             "aliases": "", "source": "independent_fixture"}
+             "aliases": ""}
             for brand, model in (
                 ("Aster", "Swift 125"), ("Aster", "Swift 400"),
                 ("Aster", "Swift 125 GT"), ("Boreal", "Comet 125"),
@@ -194,7 +194,7 @@ class MatchingTests(unittest.TestCase):
 
     def test_brand_aliases_require_explicit_input(self):
         row = {"brand": "Aster", "model": "Swift 125", "vehicle_type": "motorcycle",
-               "aliases": "", "source": "independent_fixture"}
+               "aliases": ""}
         self.assertNotEqual(module.Matcher([row]).resolve("ASTER MOTORS", "SWIFT 125").match_status,
                             "ALIAS_MATCH")
         verified = module.Matcher([row], [{"brand": "Aster", "alias": "ASTER MOTORS"}])
@@ -204,7 +204,7 @@ class MatchingTests(unittest.TestCase):
     def test_generic_short_designation_is_not_a_conflict(self):
         rows = [
             {"brand": brand, "model": model, "vehicle_type": "car",
-             "aliases": "", "source": "independent_fixture"}
+             "aliases": ""}
             for brand, model in (("Aster", "Tourer"), ("Boreal", "C 200"))
         ]
         decision = module.Matcher(rows).resolve("Aster", "C 200")
@@ -224,7 +224,7 @@ class LatinComparisonTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog = [
             {"brand": brand, "model": model, "vehicle_type": "motorcycle",
-             "aliases": "", "source": "independent_fixture"}
+             "aliases": ""}
             for brand, model in (("Aster", "Meteor700"), ("Boreal", "Orbit150"))
         ]
         cls.matcher = module.Matcher(cls.catalog)
@@ -279,7 +279,7 @@ class AdvancedV2Tests(unittest.TestCase):
     def setUpClass(cls):
         rows = [
             {"brand": brand, "model": model, "vehicle_type": "car",
-             "aliases": "", "source": "independent_fixture"}
+             "aliases": ""}
             for brand, model in (
                 ("Aster", "Nova"), ("Aster", "Nova Cross"),
                 ("Aster", "Nova Sport"), ("Boreal", "Runner 125"),
@@ -386,7 +386,7 @@ class AdvancedV2Tests(unittest.TestCase):
 
     def test_real_catalog_numeric_families(self):
         catalog = module.read_csv(HERE / "data" / "vehicle_catalog.csv",
-                                  {"brand", "model", "vehicle_type", "aliases", "source"})
+                                  {"brand", "model", "vehicle_type", "aliases"})
         real = module.Matcher(catalog)
         self.assertEqual(real.resolve("TOYOTA", "YARIS CROSS").corrected_model,
                          "Yaris Cross")
@@ -404,7 +404,7 @@ class FinalRefinementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rows = [{"brand": brand, "model": model, "vehicle_type": "car",
-                 "aliases": "", "source": "independent_refinement_fixture"}
+                 "aliases": ""}
                 for brand, model in (
                     ("Pentar", "Pioneer"), ("Pentar", "Pioneer Cross"),
                     ("Pentar", "Ranger 300"), ("Pentar", "Ranger 350"),
@@ -506,7 +506,7 @@ class ConsolidatedWorkflowTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog_path = HERE / "data" / "vehicle_catalog.csv"
         rows = module.read_csv(cls.catalog_path,
-                               {"brand", "model", "vehicle_type", "aliases", "source"})
+                               {"brand", "model", "vehicle_type", "aliases"})
         cls.matcher = module.Matcher(rows)
 
     @staticmethod
@@ -529,6 +529,102 @@ class ConsolidatedWorkflowTests(unittest.TestCase):
         self.assertEqual(self.matcher.resolve("Yamaha/", "MT-09").corrected_model, "MT-09")
         self.assertEqual(self.matcher.resolve("Dacia/", "Sandero").corrected_model, "Sandero")
 
+    def test_greek_localized_aliases_and_latin_transliterations(self):
+        shared = (
+            ("Volkswagen", "Σκαραβαίος", "SKARAVEOS", 6),
+            ("Volkswagen", "Σκαθάρι", "SKATHARI", 6),
+            ("Volkswagen", "Κατσαριδάκι", "KATSARIDAKI", 6),
+            ("Volkswagen", "Χελώνα", "CHELONA", 6),
+            ("Citroen", "Ντεσεβό", "DESEVO", 2),
+            ("Citroen", "Ντε Σεβό", "DE SEVO", 2),
+            ("Citroen", "Ασχημόπαπο", "ASCHIMOPAPO", 2),
+            ("Fiat", "500αράκι", "500ARAKI", 2),
+            ("Fiat", "Πεντακοσαράκι", "PEDAKOSARAKI", 2),
+            ("Renault", "Κατρέλ", "KATREL", 3),
+            ("Renault", "Κατρουλή", "KATRULI", 3),
+        )
+        for brand, greek, latin, candidate_count in shared:
+            with self.subTest(brand=brand, alias=greek):
+                normalized = module.normalize.normalize_text(greek)
+                self.assertEqual(module.normalize.latin_comparison_text(normalized), latin)
+                for alias in (greek, latin):
+                    result = self.matcher.resolve(brand, alias)
+                    self.assertEqual(result.match_status, "AMBIGUOUS")
+                    self.assertEqual(result.candidate_count, candidate_count)
+
+        for alias in ("Βάτραχος", "VATRACHOS"):
+            with self.subTest(alias=alias):
+                result = self.matcher.resolve("Citroen", alias)
+                self.assertIn(result.match_status, FULL_MATCHES)
+                self.assertEqual((result.corrected_brand, result.corrected_model),
+                                 ("Citroën", "DS"))
+
+    def test_shared_greek_alias_numeric_context_narrows_without_accepting(self):
+        cases = (
+            ("Volkswagen", "1300 Σκαραβαίος", {"1300 Beetle", "Fusca 1300"}),
+            ("Volkswagen", "1300 SKARAVEOS", {"1300 Beetle", "Fusca 1300"}),
+            ("Volkswagen", "1200 Σκαραβαίος", {"1200 Beetle"}),
+            ("Fiat", "110F Πεντακοσαράκι", {"500-110F"}),
+        )
+        for brand, model, expected in cases:
+            with self.subTest(brand=brand, model=model):
+                result = self.matcher.resolve(brand, model)
+                candidates = {self.matcher.identities[item.identity_id].model
+                              for item in result.top_candidates}
+                self.assertEqual((result.match_status, result.match_method),
+                                 ("AMBIGUOUS", "SHARED_ALIAS_NUMERIC_CONTEXT"))
+                self.assertEqual(candidates, expected)
+
+        conflicting = self.matcher.resolve("Volkswagen", "1700 Σκαραβαίος")
+        self.assertEqual((conflicting.match_status, conflicting.match_method,
+                          conflicting.candidate_count),
+                         ("AMBIGUOUS", "SHARED_ALIAS_NUMERIC_CONFLICT", 6))
+
+    def test_existing_aliases_and_canonical_names_are_unchanged(self):
+        cases = (
+            ("Volkswagen", "Type 1", "ALIAS_MATCH", "Beetle"),
+            ("Volkswagen", "Käfer", "ALIAS_MATCH", "Beetle"),
+            ("Citroen", "2CV", "ALIAS_MATCH", "Az 2CV"),
+            ("Fiat", "Nuova 500", "ALIAS_MATCH", "500"),
+            ("Citroen", "DS", "EXACT_MATCH", "DS"),
+            ("Volkswagen", "1200 Beetle", "EXACT_MATCH", "1200 Beetle"),
+            ("Volkswagen", "1300 Beetle", "EXACT_MATCH", "1300 Beetle"),
+            ("Citroen", "Azu 2CV", "EXACT_MATCH", "Azu 2CV"),
+            ("Renault", "4 Tl", "EXACT_MATCH", "4 Tl"),
+            ("Renault", "R4 Clan", "EXACT_MATCH", "R4 Clan"),
+            ("Fiat", "500-110F", "EXACT_MATCH", "500-110F"),
+        )
+        for brand, model, status, canonical_model in cases:
+            with self.subTest(brand=brand, model=model):
+                result = self.matcher.resolve(brand, model)
+                self.assertEqual((result.match_status, result.corrected_model),
+                                 (status, canonical_model))
+
+    def test_greek_alias_collisions_and_broad_nicknames_abstain(self):
+        collision_rows = [
+            {"brand": "Aster", "model": model, "vehicle_type": "car",
+             "aliases": "Κοινό"}
+            for model in ("Nova", "Nova Cross")
+        ]
+        collision = module.Matcher(collision_rows).resolve("Aster", "Κοινό")
+        self.assertEqual((collision.match_status, collision.match_method),
+                         ("AMBIGUOUS", "EXACT_NAME_COLLISION"))
+
+        for brand, nickname in (("BMW", "Μπέμπα"),
+                                ("Honda", "Παπί"), ("Honda", "Παπάκι"),
+                                ("Honda", "Μπόμπος"), ("Honda", "Ζετάκι"),
+                                ("Mercedes-Benz", "Καναδέζα"),
+                                ("Volkswagen", "Πλοιαρχικό"),
+                                ("Citroen", "Θεά"),
+                                ("Fuldamobil", "Ασημένιος ψύλλος")):
+            with self.subTest(brand=brand, nickname=nickname):
+                self.assertNotIn(self.matcher.resolve(brand, nickname).match_status,
+                                 FULL_MATCHES)
+        brandless = self.matcher.resolve("", "Σκαραβαίος")
+        self.assertEqual((brandless.match_status, brandless.corrected_brand,
+                          brandless.corrected_model), ("AMBIGUOUS", "", ""))
+        self.assertGreater(brandless.candidate_count, 1)
+
     def test_public_statuses(self):
         self.assertEqual(module.public_status(self.matcher.resolve("Toyota", "Yaris")), "MATCHED")
         self.assertEqual(module.public_status(self.matcher.resolve("Toyota", "Civic")), "REVIEW")
@@ -542,9 +638,9 @@ class ConsolidatedWorkflowTests(unittest.TestCase):
             review = root / "review.csv"
             catalog_rows = [
                 {"brand": "Aster", "model": "Nova", "vehicle_type": "car",
-                 "aliases": "", "source": "test"},
+                 "aliases": ""},
                 {"brand": "Aster", "model": "Nova Cross", "vehicle_type": "car",
-                 "aliases": "", "source": "test"},
+                 "aliases": ""},
             ]
             self.write_csv(catalog, tuple(catalog_rows[0]), catalog_rows)
 

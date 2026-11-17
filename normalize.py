@@ -1,8 +1,8 @@
-"""Loss-conscious text normalization of raw vehicle brand/model data.
+"""Catalog-independent normalization for vehicle brand/model inputs.
 
-Run: python normalize.py [input.csv] [output.csv]
-This command does not identify vehicles or consult a reference catalogue.
-It adds loss-conscious Latin comparison columns without replacing normalized text.
+Use normalize_dataframe(df, brand_col=..., model_col=...) with pandas, or
+python normalize.py input.csv output.csv for the existing CSV workflow.
+Neither operation matches vehicle identities or loads a catalog.
 """
 
 import argparse
@@ -12,6 +12,7 @@ import tempfile
 import unicodedata
 from collections import Counter
 from pathlib import Path
+
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -53,15 +54,64 @@ def strip_greek_diacritics(value: str) -> str:
     return unicodedata.normalize("NFC", "".join(result))
 
 
-def normalize_text(value: str | None) -> str | None:
-    """Return comparable text, or None for an explicit missing placeholder."""
-    if value is None:
-        return None
+def _normalize_format(value: str) -> str:
+    """Normalize presentation, preserving meaningful punctuation and spacing."""
     text = unicodedata.normalize("NFKC", value)
     text = " ".join(text.split())
     text = strip_greek_diacritics(text.casefold().upper())
-    text = text.translate(DASHES).translate(QUOTES)
-    return None if text in MISSING_TOKENS else text
+    return text.translate(DASHES).translate(QUOTES)
+
+
+def _missing_keys(missing_tokens) -> frozenset[str]:
+    if missing_tokens is None:
+        return MISSING_TOKENS
+    if missing_tokens is MISSING_TOKENS:
+        return MISSING_TOKENS
+    if isinstance(missing_tokens, (str, bytes)):
+        raise TypeError("missing_tokens must be an iterable of strings, not a string")
+    try:
+        tokens = tuple(missing_tokens)
+    except TypeError as exc:
+        raise TypeError("missing_tokens must be an iterable of strings") from exc
+    if any(not isinstance(token, str) for token in tokens):
+        raise TypeError("missing_tokens must contain only strings")
+    return frozenset(_normalize_format(token) for token in tokens)
+
+
+def _punctuation_chars(allowed_punctuation) -> frozenset[str]:
+    if allowed_punctuation is None:
+        return COMMON_PUNCTUATION
+    if allowed_punctuation is COMMON_PUNCTUATION:
+        return COMMON_PUNCTUATION
+    if isinstance(allowed_punctuation, str):
+        chars = allowed_punctuation
+    else:
+        try:
+            chars = tuple(allowed_punctuation)
+        except TypeError as exc:
+            raise TypeError("allowed_punctuation must be a string or iterable of characters") from exc
+    if any(not isinstance(char, str) or len(char) != 1 for char in chars):
+        raise ValueError("allowed_punctuation must contain single characters")
+    return frozenset(chars)
+
+
+def normalize_text(value: str | None, *, missing_tokens=None) -> str | None:
+    """Normalize text without dropping punctuation; optionally customize missing tokens.
+
+    ``missing_tokens=None`` preserves the historical default placeholders.
+    Passing a collection replaces that set; use an empty collection to retain
+    literal strings such as UNKNOWN or NULL. ``None`` is always missing.
+    """
+    return _normalize_text_with_keys(value, _missing_keys(missing_tokens))
+
+
+def _normalize_text_with_keys(value: str | None, missing_keys: frozenset[str]) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("normalize_text expects a string or None")
+    text = _normalize_format(value)
+    return None if text in missing_keys else text
 
 
 
@@ -133,17 +183,19 @@ def has_mixed_greek_latin(value: str) -> bool:
     return greek and latin
 
 
-def has_unusual_symbols(value: str) -> bool:
+def has_unusual_symbols(value: str, *, allowed_punctuation=None) -> bool:
+    allowed = _punctuation_chars(allowed_punctuation)
     return any(
-        not (char.isalnum() or char.isspace() or char in COMMON_PUNCTUATION)
+        not (char.isalnum() or char.isspace() or char in allowed)
         for char in value
     )
 
 
-def is_numeric_only(value: str) -> bool:
+def is_numeric_only(value: str, *, allowed_punctuation=None) -> bool:
     """Digits with separators, and no letters or other symbols."""
+    allowed = _punctuation_chars(allowed_punctuation)
     return any(char.isdecimal() for char in value) and all(
-        char.isdecimal() or char.isspace() or char in COMMON_PUNCTUATION
+        char.isdecimal() or char.isspace() or char in allowed
         for char in value
     )
 
@@ -155,8 +207,10 @@ def is_possible_garbage(value: str) -> bool:
     )
 
 
-def quality_flags(brand: str | None, model: str | None) -> tuple[str, ...]:
-    """Describe observable text properties in a fixed, documented order."""
+def quality_flags(brand: str | None, model: str | None, *,
+                  allowed_punctuation=None) -> tuple[str, ...]:
+    """Describe observable text properties; allowed punctuation affects flags only."""
+    allowed = _punctuation_chars(allowed_punctuation)
     fields = (value for value in (brand, model) if value is not None)
     combined = " ".join(fields)
     found = set()
@@ -168,13 +222,13 @@ def quality_flags(brand: str | None, model: str | None) -> tuple[str, ...]:
         found.add("BOTH_MISSING")
     if brand is not None and model is not None and brand == model:
         found.add("BRAND_EQUALS_MODEL")
-    if brand is not None and is_numeric_only(brand):
+    if brand is not None and is_numeric_only(brand, allowed_punctuation=allowed):
         found.add("NUMERIC_ONLY_BRAND")
-    if model is not None and is_numeric_only(model):
+    if model is not None and is_numeric_only(model, allowed_punctuation=allowed):
         found.add("NUMERIC_ONLY_MODEL")
     if has_mixed_greek_latin(combined):
         found.add("MIXED_GREEK_LATIN")
-    if has_unusual_symbols(combined):
+    if has_unusual_symbols(combined, allowed_punctuation=allowed):
         found.add("UNUSUAL_SYMBOLS")
     if brand is not None and len(brand.split()) > 1:
         found.add("MULTIWORD_BRAND")
@@ -183,9 +237,11 @@ def quality_flags(brand: str | None, model: str | None) -> tuple[str, ...]:
     return tuple(flag for flag in FLAG_ORDER if flag in found)
 
 
-def normalize_row(row: dict[str, str]) -> dict[str, str]:
-    brand = normalize_text(row["brand"])
-    model = normalize_text(row["model"])
+def normalize_row(row: dict[str, str], *, missing_tokens=None,
+                  allowed_punctuation=None) -> dict[str, str]:
+    missing_keys = _missing_keys(missing_tokens)
+    brand = _normalize_text_with_keys(row["brand"], missing_keys)
+    model = _normalize_text_with_keys(row["model"], missing_keys)
     return {
         "brand_raw": row["brand"],
         "model_raw": row["model"],
@@ -195,17 +251,99 @@ def normalize_row(row: dict[str, str]) -> dict[str, str]:
         "model_latin": latin_comparison_text(model) or "",
         "brand_missing": str(brand is None).lower(),
         "model_missing": str(model is None).lower(),
-        "quality_flags": "|".join(quality_flags(brand, model)),
+        "quality_flags": "|".join(quality_flags(brand, model, allowed_punctuation=allowed_punctuation)),
     }
 
 
-def normalize_file(input_path: Path, output_path: Path) -> dict:
+def normalize_dataframe(df, *, brand_col: str, model_col: str, prefix: str = "ab_",
+                        missing_tokens=None, allowed_punctuation=None):
+    """Return a new DataFrame with loss-conscious normalization columns.
+
+    Original columns, index, order and duplicate rows are retained.  The
+    original input is never mutated. pandas is imported only when this API is
+    called, so string/CSV usage does not require the dependency.
+
+    Added columns (prefixed): brand_normalized, model_normalized, brand_latin,
+    model_latin, brand_missing, model_missing, quality_flags. Missing flags are
+    booleans; absent normalized strings are represented by empty strings.
+    """
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError(
+            "normalize_dataframe requires pandas; install it with 'pip install pandas'"
+        ) from exc
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+    if not isinstance(brand_col, str) or not brand_col:
+        raise ValueError("brand_col must be a nonempty column name")
+    if not isinstance(model_col, str) or not model_col:
+        raise ValueError("model_col must be a nonempty column name")
+    if brand_col == model_col:
+        raise ValueError("brand_col and model_col must be different columns")
+    if not isinstance(prefix, str):
+        raise TypeError("prefix must be a string")
+    if not df.columns.is_unique:
+        raise ValueError("DataFrame column names must be unique")
+    missing_columns = [col for col in (brand_col, model_col) if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing DataFrame columns: {', '.join(missing_columns)}")
+
+    fields = (
+        "brand_normalized", "model_normalized", "brand_latin", "model_latin",
+        "brand_missing", "model_missing", "quality_flags",
+    )
+    output_names = [prefix + field for field in fields]
+    collisions = set(output_names) & set(df.columns)
+    if collisions:
+        raise ValueError(f"Output column collision: {', '.join(sorted(collisions))}")
+
+    def coerce(value, column):
+        if value is None or value is pd.NA:
+            return None
+        # A scalar missing-value check works for np.nan and pandas nullable types.
+        # Lists/dicts are invalid field values, not missing strings.
+        if not isinstance(value, str):
+            if not pd.api.types.is_scalar(value):
+                raise TypeError(f"Non-scalar value in {column!r}: {type(value).__name__}")
+            if pd.isna(value):
+                return None
+            raise TypeError(
+                f"Expected strings or missing values in {column!r}; got {type(value).__name__}"
+            )
+        return value
+
+    missing_keys = _missing_keys(missing_tokens)
+    allowed_chars = _punctuation_chars(allowed_punctuation)
+    processed = []
+    # Iterate directly over columns rather than relying on index alignment:
+    # duplicate index labels must not duplicate or reorder records.
+    for brand_input, model_input in zip(df[brand_col], df[model_col]):
+        brand = _normalize_text_with_keys(coerce(brand_input, brand_col), missing_keys)
+        model = _normalize_text_with_keys(coerce(model_input, model_col), missing_keys)
+        processed.append((
+            brand or "", model or "",
+            latin_comparison_text(brand) or "", latin_comparison_text(model) or "",
+            brand is None, model is None, "|".join(quality_flags(brand, model, allowed_punctuation=allowed_chars)),
+        ))
+
+    result = df.copy()
+    for position, name in enumerate(output_names):
+        result[name] = [record[position] for record in processed]
+    return result
+
+
+def normalize_file(input_path: Path, output_path: Path, *, missing_tokens=None,
+                   allowed_punctuation=None) -> dict:
     """Stream rows to an atomic output file and return report statistics."""
     if input_path.resolve() == output_path.resolve():
         raise ValueError("Input and output paths must differ")
     if not input_path.is_file():
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
 
+    missing_keys = _missing_keys(missing_tokens)
+    allowed_chars = _punctuation_chars(allowed_punctuation)
     stats = {
         "rows": 0, "missing_brand": 0, "missing_model": 0,
         "changed_brand": 0, "changed_model": 0,
@@ -232,7 +370,8 @@ def normalize_file(input_path: Path, output_path: Path) -> dict:
                 for line_number, row in enumerate(reader, start=2):
                     if None in row or any(row[column] is None for column in INPUT_COLUMNS):
                         raise ValueError(f"Malformed CSV row at line {line_number}")
-                    result = normalize_row(row)
+                    result = normalize_row(row, missing_tokens=missing_keys,
+                                           allowed_punctuation=allowed_chars)
                     writer.writerow(result)
                     stats["rows"] += 1
                     stats["missing_brand"] += result["brand_missing"] == "true"
@@ -256,6 +395,7 @@ def normalize_file(input_path: Path, output_path: Path) -> dict:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
     return stats
+
 
 
 def print_report(stats: dict, input_path: Path, output_path: Path) -> None:

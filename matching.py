@@ -1,9 +1,9 @@
-"""AutoBrands: catalog matcher and CSV CLI in one file.
+"""Catalog-driven vehicle identity matching for normalized records and DataFrames.
 
-Depends on the existing normalize.py and data/vehicle_catalog.csv.
-First normalize raw brand/model CSV with normalize.py, then run this file.
-Use --review-output to export unresolved cases, fill action=MATCH or NO_MATCH,
-and use --import-reviews to store explicit human decisions.
+Use Matcher.from_csv() once, then Matcher.match_dataframe() on the output of
+normalize.normalize_dataframe(). The existing normalized-CSV CLI also works.
+No human-confirmation state or learning from fuzzy predictions is performed.
+Similarity scores are not calibrated probabilities.
 """
 import argparse
 import csv
@@ -24,6 +24,14 @@ from rapidfuzz import fuzz, process
 from rapidfuzz.distance import DamerauLevenshtein
 
 import normalize
+
+# Matching configuration: change these defaults in one place.
+# Explicit Matcher(...) / from_csv(...) arguments and CLI flags override them.
+DEFAULT_MIN_SCORE = 94.0
+DEFAULT_MIN_MARGIN = 8.0
+DEFAULT_MIN_BRAND = 88.0
+DEFAULT_MIN_MODEL = 88.0
+DEFAULT_TOP_K = 5
 
 
 def norm(value: str | None) -> str:
@@ -90,6 +98,11 @@ def numeric_signature(value: str) -> tuple[str, ...]:
     return tuple(re.findall(r"\d+", value))
 
 
+def punctuation_signature(value: str) -> tuple[str, ...]:
+    """Identity-bearing separators; whitespace differences do not affect them."""
+    return tuple(char for char in value if char in "+/")
+
+
 def model_family_risk(query: str, canonical: str) -> bool:
     """Avoid accepting a different number or added/removed model token."""
     if numeric_signature(query) != numeric_signature(canonical):
@@ -143,8 +156,12 @@ class Decision:
 
 class Matcher:
     def __init__(self, catalog_rows: list[dict], brand_alias_rows: list[dict] = None,
-                 min_score: float = 94, min_margin: float = 8,
-                 min_brand: float = 88, min_model: float = 88):
+                 min_score: float = DEFAULT_MIN_SCORE, min_margin: float = DEFAULT_MIN_MARGIN,
+                 min_brand: float = DEFAULT_MIN_BRAND, min_model: float = DEFAULT_MIN_MODEL,
+                 top_k: int = DEFAULT_TOP_K):
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise ValueError("top_k must be a positive integer")
+        self.top_k = top_k
         self.min_score = min_score
         self.min_margin = min_margin
         self.min_brand = min_brand
@@ -175,6 +192,7 @@ class Matcher:
         self.compact_full_lookup = defaultdict(set)
         self.token_full_lookup = defaultdict(set)
         self.folded_model_lookup = defaultdict(set)
+        self.greek_alias_folded_lookup = defaultdict(set)
         self.model_tokens = set()
         self.brand_choices = {}
         self.model_choices_by_brand = defaultdict(lambda: defaultdict(set))
@@ -205,6 +223,10 @@ class Matcher:
                 self.compact_model_lookup[compact(variant)].add(identity_id)
                 self.folded_model_lookup[latin_fold(variant)].add(identity_id)
                 self.folded_model_lookup[latin_fold(normalize.latin_comparison_text(variant) or "")].add(identity_id)
+                if (variant != key[1] and
+                        any("GREEK" in unicodedata.name(char, "") for char in variant)):
+                    alias_folded = latin_fold(normalize.latin_comparison_text(variant) or variant)
+                    self.greek_alias_folded_lookup[alias_folded].add(identity_id)
                 self.model_tokens.update(latin_fold(token) for token in name_tokens(variant))
                 if variant != key[1]:
                     self.alias_lookup[variant].add(identity_id)
@@ -283,7 +305,7 @@ class Matcher:
             vehicle_type=identity.vehicle_type, match_status=status,
             match_method=method, match_score=f"{score:.1f}",
             confidence_level="HIGH" if status != "FUZZY_MATCH" else "MEDIUM",
-            candidate_count=len(candidates), top_candidates=candidates[:5],
+            candidate_count=len(candidates), top_candidates=tuple(candidates[:self.top_k]),
             extra_info=extra_info,
         )
 
@@ -291,7 +313,7 @@ class Matcher:
         score = f"{candidates[0].score:.1f}" if candidates else ""
         return Decision(match_status=status, match_method=method, match_score=score,
                         confidence_level="LOW" if candidates else "NONE",
-                        candidate_count=len(candidates), top_candidates=tuple(candidates[:5]))
+                        candidate_count=len(candidates), top_candidates=tuple(candidates[:self.top_k]))
 
     def _exact(self, brand: str, model: str) -> Decision | None:
         brand_key, brand_alias = self.brand_key(brand)
@@ -313,6 +335,16 @@ class Matcher:
             if len(ids) > 1:
                 return self.suggestion("AMBIGUOUS", "EXACT_NAME_COLLISION",
                                        self._fixed_rank(ids, "exact_name_collision"))
+            folded_alias_ids = (self.greek_alias_folded_lookup.get(
+                latin_fold(normalize.latin_comparison_text(model) or model), set()) &
+                self.by_brand[brand_key])
+            if len(folded_alias_ids) == 1:
+                return self.accepted(next(iter(folded_alias_ids)), "ALIAS_MATCH",
+                                     "FOLDED_EXPLICIT_ALIAS")
+            if len(folded_alias_ids) > 1:
+                return self.suggestion(
+                    "AMBIGUOUS", "FOLDED_ALIAS_COLLISION",
+                    self._fixed_rank(folded_alias_ids, "folded_alias_collision"))
             if len(compact(model)) >= 4:
                 compact_ids = self.compact_model_lookup.get(compact(model), set())
                 local_compact = (compact_ids | mixed_ids) & self.by_brand[brand_key]
@@ -321,6 +353,17 @@ class Matcher:
                     method = "CATALOG_COMPACT_MODEL" if identity_id in compact_ids else "CATALOG_FOLDED_MODEL"
                     return self.accepted(identity_id, "FUZZY_MATCH", method, 97)
                 if len(local_compact) > 1:
+                    # A compact key may merge distinct identities (Golf/Golf+).
+                    # Use observed identity-bearing punctuation to separate them,
+                    # without requiring identical whitespace around punctuation.
+                    same_punctuation = {
+                        candidate for candidate in local_compact
+                        if any(punctuation_signature(variant) == punctuation_signature(model)
+                               for variant in self.identities[candidate].variants)
+                    }
+                    if len(same_punctuation) == 1:
+                        winner = next(iter(same_punctuation))
+                        return self.accepted(winner, "FUZZY_MATCH", "CATALOG_PUNCTUATION_SPACING", 97)
                     return self.suggestion("AMBIGUOUS", "COMPACT_NAME_COLLISION",
                                            self._fixed_rank(local_compact, "compact_name_collision"))
             foreign = self.exact_model_ids(model) - self.by_brand[brand_key]
@@ -343,7 +386,50 @@ class Matcher:
         return None
 
     def _fixed_rank(self, ids: set[int], evidence: str) -> list[Ranked]:
-        return [Ranked(i, 100, 100, 100, evidence) for i in sorted(ids)][:10]
+        return [Ranked(i, 100, 100, 100, evidence) for i in sorted(ids)]
+
+    def _shared_alias_numeric_context(self, brand: str, model: str) -> Decision | None:
+        """Narrow shared aliases with explicit numbers, but never auto-accept them."""
+        brand_key, _ = self.brand_key(brand)
+        tokens = name_tokens(model)
+        if not brand_key or len(tokens) < 2:
+            return None
+        narrowed = set()
+        conflicting = set()
+        for alias, ids in self.alias_lookup.items():
+            local_ids = ids & self.by_brand[brand_key]
+            if len(local_ids) < 2:
+                continue
+            alias_tokens = name_tokens(alias)
+            if not alias_tokens or len(alias_tokens) >= len(tokens):
+                continue
+            alias_folded = latin_fold(normalize.latin_comparison_text(alias) or alias)
+            for start in range(len(tokens) - len(alias_tokens) + 1):
+                end = start + len(alias_tokens)
+                span = " ".join(tokens[start:end])
+                span_folded = latin_fold(normalize.latin_comparison_text(span) or span)
+                if span_folded != alias_folded:
+                    continue
+                context_numbers = numeric_signature(" ".join(tokens[:start] + tokens[end:]))
+                if not context_numbers:
+                    continue
+                compatible = {identity_id for identity_id in local_ids
+                              if all(number in numeric_signature(
+                                  self.identities[identity_id].model_key)
+                                     for number in context_numbers)}
+                if compatible:
+                    narrowed.update(compatible)
+                else:
+                    conflicting.update(local_ids)
+        if narrowed:
+            return self.suggestion(
+                "AMBIGUOUS", "SHARED_ALIAS_NUMERIC_CONTEXT",
+                self._fixed_rank(narrowed, "shared_alias_numeric_context"))
+        if conflicting:
+            return self.suggestion(
+                "AMBIGUOUS", "SHARED_ALIAS_NUMERIC_CONFLICT",
+                self._fixed_rank(conflicting, "shared_alias_numeric_conflict"))
+        return None
 
     def _cross_field(self, brand: str, model: str) -> Decision | None:
         # Swapped fields: the second field must be an explicit brand and the
@@ -752,47 +838,11 @@ class Matcher:
                                    self.identities[r.identity_id].model_key))
         return ranked
 
-    def set_verified_mappings(self, rows: list[dict]) -> None:
-        """Install explicitly reviewed pair-level decisions, never fuzzy-generated aliases."""
-        verified = {}
-        for line_no, row in enumerate(rows, 2):
-            key = (norm(row["brand_input"]), norm(row["model_input"]))
-            if not any(key):
-                raise ValueError(f"Verified mapping row {line_no}: at least one input field required")
-            action = row["action"].strip().upper()
-            if action == "NO_MATCH":
-                if row["canonical_brand"].strip() or row["canonical_model"].strip():
-                    raise ValueError(f"Verified mapping row {line_no}: NO_MATCH cannot have a target")
-                value = None
-            elif action == "MATCH":
-                target = (norm(row["canonical_brand"]), norm(row["canonical_model"]))
-                if target not in self.by_pair:
-                    raise ValueError(f"Verified mapping row {line_no}: target missing from canonical catalog")
-                value = self.by_pair[target]
-            else:
-                raise ValueError(f"Verified mapping row {line_no}: invalid action {action!r}")
-            if key in verified and verified[key] != value:
-                raise ValueError(f"Verified mapping row {line_no}: contradictory decisions")
-            verified[key] = value
-        self.verified_mappings = verified
-
     def resolve(self, brand_value: str | None, model_value: str | None, *,
                 brand_latin: str | None = None, model_latin: str | None = None) -> Decision:
         brand, model = norm(brand_value), norm(model_value)
         comparison_text(brand, brand_latin)
         comparison_text(model, model_latin)
-        pair = (brand, model)
-        if pair in getattr(self, "verified_mappings", {}):
-            target_id = self.verified_mappings[pair]
-            if target_id is None:
-                return Decision(match_method="HUMAN_NO_MATCH")
-            target = self.identities[target_id]
-            rank = Ranked(target_id, 100, 100, 100, "human_verified")
-            return Decision(corrected_brand=target.brand, corrected_model=target.model,
-                            vehicle_type=target.vehicle_type, match_status="ALIAS_MATCH",
-                            match_method="HUMAN_VERIFIED", match_score="100.0",
-                            confidence_level="HIGH", candidate_count=1,
-                            top_candidates=(rank,))
         stripped = (brand[:-1] if isinstance(brand_value, str) and brand_value.endswith("/")
                     and brand.endswith("/") and not brand.endswith("//") else "")
         strip_brand_slash = (stripped in self.brands and not any(c in model for c in "+/")
@@ -802,13 +852,16 @@ class Matcher:
                                  model_latin=model_latin)
         if decision.match_status in {"EXACT_MATCH", "ALIAS_MATCH", "FUZZY_MATCH"}:
             identity = self.identities[self.by_pair[(norm(decision.corrected_brand), norm(decision.corrected_model))]]
-            punctuation = lambda text: tuple(c for c in text if c in "+/")
-            observed = punctuation((stripped if strip_brand_slash else brand) + model)
-            supported = {punctuation(identity.brand_key + variant) for variant in identity.variants}
+            observed = punctuation_signature((stripped if strip_brand_slash else brand) + model)
+            supported = {punctuation_signature(identity.brand_key + variant)
+                         for variant in identity.variants}
             if observed not in supported:
                 return self.suggestion("AMBIGUOUS", "MEANINGFUL_PUNCTUATION_MISMATCH",
                                        list(decision.top_candidates))
             if decision.match_status == "ALIAS_MATCH" and not decision.extra_info:
+                if decision.match_method == "FOLDED_EXPLICIT_ALIAS":
+                    decision = replace(decision, extra_info=model_value or "")
+                    return decision
                 for original in (model_value, brand_value):
                     value = norm(original)
                     if value != identity.model_key and value in identity.variants:
@@ -826,6 +879,9 @@ class Matcher:
         exact = self._exact(brand, model)
         if exact:
             return exact
+        shared_alias_context = self._shared_alias_numeric_context(brand, model)
+        if shared_alias_context:
+            return shared_alias_context
         if brand:
             notation = self._notation(brand, model)
             if notation:
@@ -967,18 +1023,128 @@ class Matcher:
             return Decision(corrected_brand=self.brand_choices[brand_key],
                             match_status="PARTIAL_MATCH", match_method="BRAND_ONLY_WEAK_MODEL",
                             match_score=f"{best.score:.1f}", confidence_level="LOW",
-                            candidate_count=len(candidates), top_candidates=tuple(candidates[:5]))
+                            candidate_count=len(candidates), top_candidates=tuple(candidates[:self.top_k]))
         return self.suggestion("AMBIGUOUS", "RANKED_CANDIDATES", candidates)
 
-    def serialize_candidates(self, decision: Decision) -> str:
-        return json.dumps([
+    @classmethod
+    def from_csv(cls, catalog_path: str | Path, *, brand_aliases_path: str | Path | None = None,
+                 min_score: float = DEFAULT_MIN_SCORE, min_margin: float = DEFAULT_MIN_MARGIN,
+                 min_brand: float = DEFAULT_MIN_BRAND, min_model: float = DEFAULT_MIN_MODEL,
+                 top_k: int = DEFAULT_TOP_K) -> "Matcher":
+        """Load and index the reference catalog once for reuse across batches."""
+        rows = read_csv(Path(catalog_path), {"brand", "model", "vehicle_type", "aliases"})
+        brand_aliases = (read_csv(Path(brand_aliases_path), {"brand", "alias"})
+                         if brand_aliases_path is not None else [])
+        return cls(rows, brand_aliases, min_score=min_score, min_margin=min_margin,
+                   min_brand=min_brand, min_model=min_model, top_k=top_k)
+
+    def candidate_records(self, decision: Decision) -> list[dict]:
+        """Return ordered canonical catalog candidates, including their evidence."""
+        return [
             {"brand": self.identities[item.identity_id].brand,
              "model": self.identities[item.identity_id].model,
              "vehicle_type": self.identities[item.identity_id].vehicle_type,
              "score": item.score, "brand_score": item.brand_score,
              "model_score": item.model_score, "evidence": item.evidence}
             for item in decision.top_candidates
-        ], ensure_ascii=False, separators=(",", ":"))
+        ]
+
+    def match_dataframe(self, df, *, prefix: str = "ab_", top_k: int | None = None):
+        """Enrich an already normalized DataFrame without modifying original data.
+
+        Expected columns come from normalize.normalize_dataframe(..., prefix=prefix).
+        Output candidates are lists of dictionaries, not JSON strings.
+        Set Matcher(top_k=N) or Matcher.from_csv(top_k=N) to retain N candidates.
+        For matching parity, use the same missing-token policy as the default
+        normalize.normalize_dataframe() configuration.
+        """
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError("match_dataframe requires pandas; install pandas") from exc
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("df must be a pandas DataFrame")
+        if not isinstance(prefix, str):
+            raise TypeError("prefix must be a string")
+        if not df.columns.is_unique:
+            raise ValueError("DataFrame column names must be unique")
+        if top_k is None:
+            top_k = self.top_k
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= self.top_k:
+            raise ValueError(f"top_k must be between 1 and the matcher's top_k ({self.top_k})")
+
+        required = tuple(prefix + name for name in (
+            "brand_normalized", "model_normalized", "brand_latin", "model_latin"))
+        absent = [name for name in required if name not in df.columns]
+        if absent:
+            raise ValueError(f"Missing normalized DataFrame columns: {', '.join(absent)}")
+        fields = (
+            "corrected_brand", "corrected_model", "suggested_brand", "suggested_model",
+            "vehicle_type", "result_status", "match_status", "match_method",
+            "match_score", "brand_score", "model_score", "score_margin",
+            "confidence_level", "candidate_count", "top_candidates",
+            "extra_info",
+        )
+        outputs = [prefix + name for name in fields]
+        collisions = sorted(set(outputs) & set(df.columns))
+        if collisions:
+            raise ValueError(f"Output column collision: {', '.join(collisions)}")
+
+        cache: dict[tuple[str, str, str, str], Decision] = {}
+        records = []
+        inputs = (df[name] for name in required)
+        for brand, model, brand_latin, model_latin in zip(*inputs):
+            values = (brand, model, brand_latin, model_latin)
+            if any(not isinstance(value, str) for value in values):
+                raise TypeError("Normalized and Latin comparison columns must contain strings")
+            if any(norm(value) != value for value in (brand, model)):
+                raise ValueError("Normalized brand/model values are inconsistent with the matching normalization policy")
+            if values not in cache:
+                cache[values] = self.resolve(brand, model, brand_latin=brand_latin,
+                                             model_latin=model_latin)
+            decision = cache[values]
+            accepted = public_status(decision) == "MATCHED"
+            candidates = self.candidate_records(decision)[:top_k]
+            suggested_brand, suggested_model = self.suggested_identity(decision)
+            records.append((
+                decision.corrected_brand if accepted else "",
+                decision.corrected_model if accepted else "",
+                suggested_brand, suggested_model,
+                decision.vehicle_type if accepted else "",
+                public_status(decision), decision.match_status, decision.match_method,
+                float(decision.match_score) if decision.match_score else None,
+                candidates[0]["brand_score"] if candidates else None,
+                candidates[0]["model_score"] if candidates else None,
+                round(candidates[0]["score"] - candidates[1]["score"], 1)
+                if len(candidates) > 1 else None,
+                decision.confidence_level, decision.candidate_count, candidates,
+                decision.extra_info,
+            ))
+        result = df.copy()
+        for idx, name in enumerate(outputs):
+            result[name] = [record[idx] for record in records]
+        return result
+
+    def suggested_identity(self, decision: Decision) -> tuple[str, str]:
+        """Return a unique leading candidate, never an arbitrary tied winner."""
+        items = decision.top_candidates
+        if not items:
+            return "", ""
+        # When top_k=1, a second, potentially tied candidate was not retained.
+        if len(items) == 1 and decision.candidate_count > 1:
+            return "", ""
+        if (len(items) > 1 and items[0].score == items[1].score
+                and items[0].model_score == items[1].model_score):
+            # Preserve the brand when the competing identities share it.
+            brands = {self.identities[item.identity_id].brand for item in items}
+            return (next(iter(brands)) if len(brands) == 1 else ""), ""
+        identity = self.identities[items[0].identity_id]
+        return identity.brand, identity.model
+
+    def serialize_candidates(self, decision: Decision) -> str:
+        """JSON rendering for CSV output; Python callers use candidate_records()."""
+        return json.dumps(self.candidate_records(decision), ensure_ascii=False,
+                          separators=(",", ":"))
 
 
 HERE = Path(__file__).resolve().parent
@@ -986,16 +1152,14 @@ INPUT = HERE / "output" / "claims_normalized.csv"
 CATALOG = HERE / "data" / "vehicle_catalog.csv"
 BRAND_ALIASES = None
 OUTPUT = HERE / "output" / "claims_matched.csv"
-VERIFIED_DEFAULT = HERE / "data" / "verified_mappings.csv"
 OUTPUT_COLUMNS = (
     "brand_raw", "model_raw", "brand_normalized", "model_normalized",
     "brand_missing", "model_missing", "corrected_brand", "corrected_model",
-    "vehicle_type", "match_status", "result_status", "match_method",
-    "match_score", "confidence_level", "candidate_count", "top_candidates",
+    "suggested_brand", "suggested_model", "vehicle_type", "match_status", "result_status", "match_method",
+    "match_score", "brand_score", "model_score", "score_margin",
+    "confidence_level", "candidate_count", "top_candidates",
     "quality_flags", "brand_latin", "model_latin", "extra_info",
 )
-VERIFIED_COLUMNS = ("brand_input", "model_input", "action", "canonical_brand", "canonical_model")
-REVIEW_COLUMNS = VERIFIED_COLUMNS + ("match_status", "top_candidates")
 
 
 def public_status(decision: Decision) -> str:
@@ -1003,7 +1167,7 @@ def public_status(decision: Decision) -> str:
         return "MATCHED"
     if decision.match_status == "UNRESOLVED":
         return "UNRESOLVED"
-    return "REVIEW"
+    return "AMBIGUOUS"
 
 
 def write_csv_atomic(path: Path, columns: tuple[str, ...], rows: list[dict]) -> None:
@@ -1022,75 +1186,6 @@ def write_csv_atomic(path: Path, columns: tuple[str, ...], rows: list[dict]) -> 
             temporary.unlink(missing_ok=True)
 
 
-def import_reviews(review_path: Path, catalog_path: Path, verified_path: Path) -> int:
-    """Import explicit human decisions; REPLACE and REVOKE amend prior decisions."""
-    if review_path.resolve() in {catalog_path.resolve(), verified_path.resolve()} or \
-            verified_path.resolve() == catalog_path.resolve():
-        raise ValueError("Review, catalog and verified mapping paths must be different")
-    catalog_rows = read_csv(catalog_path, {"brand", "model", "vehicle_type", "aliases", "source"})
-    matcher = Matcher(catalog_rows)
-    existing = read_csv(verified_path, set(VERIFIED_COLUMNS)) if verified_path.exists() else []
-    matcher.set_verified_mappings(existing)
-    incoming = read_csv(review_path, set(VERIFIED_COLUMNS))
-    prior = dict(matcher.verified_mappings)
-    accepted_rows = list(existing)
-    changed = 0
-    for row in incoming:
-        action = row["action"].strip().upper()
-        if action in {"", "SKIP"}:
-            continue
-        if action not in {"MATCH", "NO_MATCH", "REPLACE", "REVOKE"}:
-            raise ValueError(f"Unknown review action: {action!r}")
-        item = {col: row[col] for col in VERIFIED_COLUMNS}
-        item["action"] = action
-        # Validate canonical targets and contradictions before any disk write.
-        pair = (norm(item["brand_input"]), norm(item["model_input"]))
-        if not any(pair):
-            raise ValueError("A review must identify at least one input field")
-        if action == "REVOKE":
-            if item["canonical_brand"].strip() or item["canonical_model"].strip():
-                raise ValueError("REVOKE must not specify a canonical target")
-            if pair in prior:
-                accepted_rows = [existing_row for existing_row in accepted_rows
-                                 if (norm(existing_row["brand_input"]),
-                                     norm(existing_row["model_input"])) != pair]
-                del prior[pair]
-                changed += 1
-            continue
-        if action in {"MATCH", "REPLACE"}:
-            target = (norm(item["canonical_brand"]), norm(item["canonical_model"]))
-            if target not in matcher.by_pair:
-                raise ValueError(f"Reviewed target not found in catalog: {target}")
-            value = matcher.by_pair[target]
-        else:
-            if item["canonical_brand"].strip() or item["canonical_model"].strip():
-                raise ValueError("NO_MATCH must not specify a canonical target")
-            value = None
-        if action == "REPLACE":
-            if pair not in prior:
-                raise ValueError(f"Cannot replace missing prior verification: {pair}")
-            if prior[pair] == value:
-                continue
-            accepted_rows = [existing_row for existing_row in accepted_rows
-                             if (norm(existing_row["brand_input"]),
-                                 norm(existing_row["model_input"])) != pair]
-            item["action"] = "MATCH"
-            accepted_rows.append(item)
-            prior[pair] = value
-            changed += 1
-            continue
-        if pair in prior:
-            if prior[pair] != value:
-                raise ValueError(f"Conflicting prior verification: {pair}")
-            continue
-        accepted_rows.append(item)
-        prior[pair] = value
-        changed += 1
-    if changed:
-        write_csv_atomic(verified_path, VERIFIED_COLUMNS, accepted_rows)
-    return changed
-
-
 def read_csv(path: Path, required: set[str]) -> list[dict]:
     with path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
@@ -1105,29 +1200,21 @@ def read_csv(path: Path, required: set[str]) -> list[dict]:
 
 def run(input_path: Path, catalog_path: Path, aliases_path: Path | None, output_path: Path,
         min_score: float, min_margin: float, min_brand: float, min_model: float,
-        verified_path: Path | None = None, review_output: Path | None = None) -> dict:
+        top_k: int = DEFAULT_TOP_K) -> dict:
     paths = (input_path.resolve(), catalog_path.resolve())
     if aliases_path is not None:
         paths += (aliases_path.resolve(),)
-    if verified_path is not None:
-        paths += (verified_path.resolve(),)
     if output_path.resolve() in paths:
-        raise ValueError("Output must differ from input, catalog, alias, and verified-mappings paths")
-    if review_output is not None and (review_output.resolve() in paths or
-                                      review_output.resolve() == output_path.resolve()):
-        raise ValueError("Review output must differ from all other paths")
+        raise ValueError("Output must differ from input, catalog, and brand alias paths")
     started = time.perf_counter()
     rows = read_csv(input_path, set(OUTPUT_COLUMNS[:6]) | {"quality_flags"})
-    catalog_rows = read_csv(catalog_path, {"brand", "model", "vehicle_type", "aliases", "source"})
+    catalog_rows = read_csv(catalog_path, {"brand", "model", "vehicle_type", "aliases"})
     alias_rows = read_csv(aliases_path, {"brand", "alias"}) if aliases_path is not None else []
-    matcher = Matcher(catalog_rows, alias_rows, min_score, min_margin, min_brand, min_model)
-    if verified_path is not None and verified_path.exists():
-        matcher.set_verified_mappings(read_csv(verified_path, set(VERIFIED_COLUMNS)))
+    matcher = Matcher(catalog_rows, alias_rows, min_score, min_margin, min_brand, min_model, top_k)
     cache = {}
     counts = Counter()
     scores = []
     examples = {}
-    reviews = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -1144,13 +1231,19 @@ def run(input_path: Path, catalog_path: Path, aliases_path: Path | None, output_
                 decision = cache[key]
                 result = {name: row[name] for name in OUTPUT_COLUMNS[:6]}
                 result.update({
-                    "corrected_brand": decision.corrected_brand,
-                    "corrected_model": decision.corrected_model,
-                    "vehicle_type": decision.vehicle_type,
+                    "corrected_brand": decision.corrected_brand if public_status(decision) == "MATCHED" else "",
+                    "corrected_model": decision.corrected_model if public_status(decision) == "MATCHED" else "",
+                    "suggested_brand": matcher.suggested_identity(decision)[0],
+                    "suggested_model": matcher.suggested_identity(decision)[1],
+                    "vehicle_type": decision.vehicle_type if public_status(decision) == "MATCHED" else "",
                     "match_status": decision.match_status,
                     "result_status": public_status(decision),
                     "match_method": decision.match_method,
                     "match_score": decision.match_score,
+                    "brand_score": decision.top_candidates[0].brand_score if decision.top_candidates else "",
+                    "model_score": decision.top_candidates[0].model_score if decision.top_candidates else "",
+                    "score_margin": round(decision.top_candidates[0].score - decision.top_candidates[1].score, 1)
+                    if len(decision.top_candidates) > 1 else "",
                     "confidence_level": decision.confidence_level,
                     "candidate_count": decision.candidate_count,
                     "top_candidates": matcher.serialize_candidates(decision),
@@ -1160,14 +1253,6 @@ def run(input_path: Path, catalog_path: Path, aliases_path: Path | None, output_
                     "extra_info": decision.extra_info,
                 })
                 writer.writerow(result)
-                if review_output is not None and public_status(decision) != "MATCHED" and \
-                        decision.match_method != "HUMAN_NO_MATCH":
-                    reviews.append({
-                        "brand_input": key[0], "model_input": key[1],
-                        "action": "", "canonical_brand": "", "canonical_model": "",
-                        "match_status": decision.match_status,
-                        "top_candidates": matcher.serialize_candidates(decision),
-                    })
                 counts[decision.match_status] += 1
                 if decision.match_score:
                     scores.append(float(decision.match_score))
@@ -1179,8 +1264,6 @@ def run(input_path: Path, catalog_path: Path, aliases_path: Path | None, output_
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    if review_output is not None:
-        write_csv_atomic(review_output, REVIEW_COLUMNS, reviews)
     elapsed = time.perf_counter() - started
     return {"rows": len(rows), "pairs": len(cache), "counts": counts,
             "scores": scores, "seconds": elapsed, "examples": examples,
@@ -1216,25 +1299,16 @@ def main() -> int:
     parser.add_argument("--brand-aliases", type=Path, default=BRAND_ALIASES,
                         help="Optional independently verified brand-alias CSV")
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--verified-mappings", type=Path, default=VERIFIED_DEFAULT,
-                        help="Persistent, human-reviewed brand/model decisions")
-    parser.add_argument("--review-output", type=Path,
-                        help="Export unresolved rows for human review (edit action and canonical fields)")
-    parser.add_argument("--import-reviews", type=Path,
-                        help="Validate and import manually reviewed decisions, then exit")
-    parser.add_argument("--min-score", type=float, default=94)
-    parser.add_argument("--min-margin", type=float, default=8)
-    parser.add_argument("--min-brand", type=float, default=88)
-    parser.add_argument("--min-model", type=float, default=88)
+    parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    parser.add_argument("--min-margin", type=float, default=DEFAULT_MIN_MARGIN)
+    parser.add_argument("--min-brand", type=float, default=DEFAULT_MIN_BRAND)
+    parser.add_argument("--min-model", type=float, default=DEFAULT_MIN_MODEL)
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     args = parser.parse_args()
     try:
-        if args.import_reviews:
-            count = import_reviews(args.import_reviews, args.catalog, args.verified_mappings)
-            print(f"Imported {count} verified decisions into {args.verified_mappings}")
-            return 0
         report = run(args.input, args.catalog, args.brand_aliases, args.output,
                      args.min_score, args.min_margin, args.min_brand, args.min_model,
-                     args.verified_mappings, args.review_output)
+                     args.top_k)
     except (OSError, ValueError, csv.Error) as exc:
         print(f"Matching failed: {exc}", file=sys.stderr)
         return 1
