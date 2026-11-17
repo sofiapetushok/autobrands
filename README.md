@@ -38,7 +38,7 @@ python run.py --input output/normalized.csv --output output/matched.csv
 ```
 
 Use another catalog with `--catalog`. A catalog must contain
-`brand,model,vehicle_type,aliases,source`. `aliases` is a pipe-separated list of
+`brand,model,vehicle_type,aliases`. `aliases` is a pipe-separated list of
 verified model aliases. An independently verified `brand,alias` CSV can be
 supplied with `--brand-aliases`.
 
@@ -111,10 +111,31 @@ CC BY-SA 4.0; the code's MIT license does not cover it. Credit VehiclesDB and
 MotorcycleName, retain their linked terms and attribution, and identify these
 transformations when redistributing the catalog.
 
-Catalog columns are `brand,model,vehicle_type,aliases,source`. It contains
+Catalog columns are `brand,model,vehicle_type,aliases`. It contains
 6,036 cars, 1,279 motorcycles, 181 scooters, and 7,246 records with unknown
 vehicle type. Source coverage and classifications are incomplete and must not
 be treated as an authoritative vehicle register.
+
+### Greek localized alias evidence
+
+The two catalog datasets and their licenses above are unchanged. The following
+pages were consulted only to verify the manually added Greek model aliases and
+their canonical identities; they are not additional bulk dataset sources.
+Where a nickname applies to several catalog identities, it is repeated on the
+supported family rows so nickname-only input remains a review case. Latin
+spellings are evaluated through the existing Greek-to-Latin comparison channel
+instead of being stored as duplicate aliases.
+
+| Publisher | Consulted source and use | Licensing / attribution |
+| --- | --- | --- |
+| Top Gear Greece / Attica Media | [Greek vehicle nicknames](https://www.topgeargreece.gr/afieroma/1020633/ta-pio-dimofili-paratsouklia-se-autokinita/) documents `500αράκι` for Fiat 500, `Σκαραβαίος`, `Σκαθάρι`, and `Χελώνα` for Volkswagen Beetle, `Βάτραχος` for Citroën DS, and the brand-level `Μπέμπα` for BMW. | The publisher's [terms](https://www.topgeargreece.gr/terms-of-use/) reserve copyright and restrict reproduction. The project retains a citation only; no article text, images, or other media are redistributed. |
+| Athens Voice / AutoTriti | The [Greek 2CV club feature](https://www.athensvoice.gr/life/life-in-athens/363208/episkeftikame-tin-elliniki-leshi-filon/) identifies Citroën 2CV as `Ντεσεβό`; [AutoTriti's 2CV history](https://www.autotriti.gr/auto/agora/citroen-2cv-ds-cx-gs-pos-zoun-simera-mesa-sti-gkama-tis-citroen_10442) documents `Ασχημόπαπο`. | Athens Voice's [terms](https://www.athensvoice.gr/oroi-hrisis/) protect its content. No open-content license was relied on for AutoTriti. Both pages are linked factual evidence only; no article text or media are redistributed. |
+| Drive / 4Troxoi | Drive's [Renault 4 history](https://www.drive.gr/test-drives/dokimi/test-drive-renault-4-e-tech-apo-ta-sixties-sto-thymiko-mas) records `Κατρέλ` and `Κατρουλή` for the historic Renault 4/4L; [4Troxoi](https://www.4troxoi.gr/lounge/giati-irthe-i-ora-na-epistrepsei-to-2cv/) independently uses `Κατρέλ` for Renault 4. | No open-content license was relied on. The pages are cited for verification; their text and media are not redistributed. |
+| Naftemporiki / Gocar | A [Naftemporiki classic-car feature](https://services.naftemporiki.gr/story/1571303/1571303) identifies the classic Fiat 500 as `Πεντακοσαράκι`; [Gocar](https://www.gocar.gr/used-models/suggestions/24681%2C5_metaxeirismena_FIAT_500_apo_5750_eyrw.html) also documents the name for Fiat 500. | No open-content license was relied on. The pages are cited for verification only; their text and media are not redistributed. |
+| ERT News / Euronews | [ERT News](https://www.ertnews.gr/ert3/thessaloniki/to-emvlimatiko-katsaridaki-erxetai-stin-plateia-aristotelous-apo-ti-lesxi-skaravaiou-thessalonikis/?noamp=mobile) and [Euronews](https://gr.euronews.com/2018/09/15/volkswagen-beetle-kafer-telos-stin-paragogi-tou) identify `Κατσαριδάκι` with the classic Volkswagen Beetle. | No open-content license was relied on. The pages are cited for verification only; their text and media are not redistributed. |
+| MotoMag / MotoTriti / Gocar / Car and Motor / 4Troxoi | Review-only evidence for [Honda Cub category names](https://www.motomag.gr/news/epikairotita/honda-cub-papi-thri-nti), [Honda Z50 family nicknames](https://www.mototriti.gr/data/news/preview_news/honda-z50-monkey-o-%C2%ABmpompos%C2%BB-ths-dekaetias-toy-90_164713.asp), [Greek Army 290 GD usage](https://www.gocar.gr/news/new-models/50105%2CH_Mercedes_Benz_G_Class_xanaginetai_kana.html), [Greek Navy Type 181 usage](https://www.carandmotor.gr/nea/vw-typ-181-toy-polemikoy-naytikoy-poleitai), and [Attica 200](https://www.4troxoi.gr/4t-classic/attica-200-i-aplotita-sta-ellinika/) was used to reject category-wide, fleet-specific, or catalog-absent mappings. | No open-content license was relied on. These pages are cited only to document review decisions; no text or media are redistributed. |
+| Citroën Greece / Automobiles Citroën | [Manufacturer history](https://www.citroen.gr/about-citroen/history.html) confirms 2CV and DS as distinct historical Citroën identities. | Citroën's [legal notice](https://www.citroen.gr/tools/legal-information.html) reserves rights in site content, vehicle names, designs, and marks. It is used only as a linked identity check; no site content is copied. |
+| Wikidata contributors / Wikimedia Foundation | Structured items for [Volkswagen Beetle](https://www.wikidata.org/wiki/Q152946), [Citroën 2CV](https://www.wikidata.org/wiki/Q326015), [Citroën DS](https://www.wikidata.org/wiki/Q465966), and [classic Fiat 500](https://www.wikidata.org/wiki/Q467767) were used as secondary model-identity and generation checks. | Wikidata [structured data is CC0](https://www.wikidata.org/wiki/Wikidata:Licensing), with no attribution requirement; links are retained for verification. Text outside the structured-data namespaces remains CC BY-SA 4.0 and was not copied. |
 
 ## Privacy and limitations
 
