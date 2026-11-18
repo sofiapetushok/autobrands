@@ -25,7 +25,7 @@ class TextNormalizationTests(unittest.TestCase):
 
     def test_whitespace_unicode_and_case(self):
         self.assertEqual(normalizer.normalize_text(" Toyota\u00a0 \tYaris "), "TOYOTA YARIS")
-        self.assertEqual(normalizer.normalize_text("Σιτροέν"), "ΣΙΤΡΟΕΝ")
+        self.assertEqual(normalizer.normalize_text("Σιτροέν"), "SITROEN")
         self.assertEqual(normalizer.normalize_text("toyota"), "TOYOTA")
         self.assertEqual(normalizer.normalize_text("Ｃ－ＨＲ"), "C-HR")
         self.assertEqual(normalizer.normalize_text("Café"), "CAFÉ")
@@ -40,9 +40,138 @@ class TextNormalizationTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(normalizer.normalize_text(value), expected)
 
+    def test_script_aware_comparison_views(self):
+        cases = (
+            ("Mercedes-Ben", "MERCEDES-BEN", "MERCEDES-BEN", False),
+            ("Mercedes-Βen", "MERCEDES-BEN", "MERCEDES-BEN", True),
+            ("Mercedes-ΒΕΝ", "MERCEDES-BEN", "MERCEDES-BEN", True),
+            ("ΒΕΝ", "VEN", "VEN", False),
+            ("Nte Sevo", "NTE SEVO", "NTE SEVO", False),
+            ("MΑZDA", "MAZDA", "MAZDA", True),
+            ("CITROΕN", "CITROEN", "CITROEN", True),
+        )
+        for raw, normalized, comparison, mixed in cases:
+            with self.subTest(raw=raw):
+                actual = normalizer.normalize_text(raw)
+                self.assertEqual(actual, normalized)
+                self.assertEqual(normalizer.latin_comparison_text(raw), comparison)
+                self.assertEqual(normalizer.has_mixed_greek_latin(raw), mixed)
+
+        self.assertEqual(normalizer.comparison_texts("MERCEDES-ΒEN"),
+                         ("MERCEDES-BEN", "MERCEDES-VEN"))
+        self.assertEqual(normalizer.comparison_texts("MERCEDES-ΒΕΝ"),
+                         ("MERCEDES-BEN", "MERCEDES-VEN"))
+        self.assertEqual(normalizer.comparison_texts("ΒΕΝ"), ("VEN", "BEN"))
+        self.assertEqual(normalizer.comparison_texts(None), ())
+
+    def test_latin_comparison_is_preserved_and_greek_comparison_is_script_aware(self):
+        cases = (
+            ("Opel", "OPEL", "OPEL", ("OPEL",)),
+            ("Mercedes-Ben", "MERCEDES-BEN", "MERCEDES-BEN", ("MERCEDES-BEN",)),
+            ("OΡEL", "OPEL", "OPEL", ("OPEL", "OREL")),
+            ("Mercedes-ΒΕΝ", "MERCEDES-BEN", "MERCEDES-BEN",
+             ("MERCEDES-BEN", "MERCEDES-VEN")),
+            ("ΟΠΕΛ", "OPEL", "OPEL", ("OPEL",)),
+            ("Golf+", "GOLF+", "GOLF+", ("GOLF+",)),
+            ("Golf +", "GOLF +", "GOLF +", ("GOLF +",)),
+        )
+        for raw, normalized, primary, alternatives in cases:
+            with self.subTest(raw=raw):
+                value = normalizer.normalize_text(raw)
+                self.assertEqual(value, normalized)
+                self.assertEqual(normalizer.latin_comparison_text(value), primary)
+                self.assertEqual(normalizer.comparison_texts(raw), alternatives)
+
+        # The mixed spelling ΜΕΡΣΕDES uses Greek sigma (S). A generic
+        # transliterator must preserve that evidence instead of guessing the
+        # vehicle-specific spelling MERCEDES.
+        self.assertEqual(normalizer.normalize_text("ΜΕΡΣΕDES-BEN"), "MEPSEDES-BEN")
+
+    def test_confusable_comparison_alternatives_are_bounded_and_stable(self):
+        cases = (
+            ("ΒΜW", "VMW", "BMW"),
+            ("ΥΑΜΑΗΑ", "YAMAIA", "YAMAHA"),
+            ("ΟΡΕL", "OREL", "OPEL"),
+            ("ΟΠΕΛ", "OPEL", "OPEL"),
+            ("ΣΚΑΘΑΡΙ", "SKATHARI", "SKATHARI"),
+            ("ΤΟΥΟΤΑ", "TOYOTA", "TOYOTA"),
+        )
+        for raw, normalized, required in cases:
+            with self.subTest(raw=raw):
+                alternatives = normalizer.comparison_texts(raw)
+                self.assertEqual(normalizer.normalize_text(raw), normalized)
+                self.assertEqual(alternatives[0], normalized)
+                self.assertIn(required, alternatives)
+                self.assertEqual(len(alternatives), len(set(alternatives)))
+                self.assertLessEqual(len(alternatives), normalizer.MAX_COMPARISON_TEXTS)
+                self.assertEqual(alternatives, normalizer.comparison_texts(raw))
+
+        long_mixed = " ".join(["ΒΜW"] * 20)
+        alternatives = normalizer.comparison_texts(long_mixed)
+        self.assertLessEqual(len(alternatives), normalizer.MAX_COMPARISON_TEXTS)
+        self.assertEqual(alternatives, normalizer.comparison_texts(long_mixed))
+
+        punctuation_model = "ΟΡΕL MT-07 + PCX125"
+        alternatives = normalizer.comparison_texts(punctuation_model)
+        for alternative in alternatives:
+            self.assertEqual("".join(c for c in punctuation_model if c.isdigit()),
+                             "".join(c for c in alternative if c.isdigit()))
+            self.assertEqual("".join(c for c in punctuation_model if c in "-+/"),
+                             "".join(c for c in alternative if c in "-+/"))
+            self.assertEqual(punctuation_model.count(" "), alternative.count(" "))
+
+    def test_dataframe_latin_columns_keep_input_and_normalized_values(self):
+        import pandas as pd
+
+        source = pd.DataFrame({
+            "brand": ["Opel", "OΡEL", "Mercedes-Ben", "Mercedes-ΒΕΝ", "ΟΠΕΛ"],
+            "model": ["Golf+", "Golf +", "MT-07", "MT07", "CBR 600 RR"],
+        }, index=["latin", "mixed", "latin-brand", "mixed-brand", "greek"])
+        original = source.copy(deep=True)
+        result = normalizer.normalize_dataframe(
+            source, brand_col="brand", model_col="model", prefix="ab_"
+        )
+        self.assertEqual(list(result["ab_brand_normalized"]),
+                         ["OPEL", "OPEL", "MERCEDES-BEN", "MERCEDES-BEN", "OPEL"])
+        self.assertEqual(list(result["ab_brand_latin"]),
+                         ["OPEL", "OPEL", "MERCEDES-BEN", "MERCEDES-BEN", "OPEL"])
+        self.assertEqual(list(result["ab_model_normalized"]),
+                         ["GOLF+", "GOLF +", "MT-07", "MT07", "CBR 600 RR"])
+        self.assertEqual(list(result["ab_model_latin"]),
+                         ["GOLF+", "GOLF +", "MT-07", "MT07", "CBR 600 RR"])
+        pd.testing.assert_frame_equal(source, original)
+
+    def test_meaningful_symbols_and_spacing_remain_distinct(self):
+        cases = (
+            ("Golf", "GOLF"), ("Golf+", "GOLF+"), ("Golf +", "GOLF +"),
+            ("MT-07", "MT-07"), ("MT07", "MT07"),
+            ("CBR 600 RR", "CBR 600 RR"), ("CBR600RR", "CBR600RR"),
+            ("Yaris/Yaris Cross", "YARIS/YARIS CROSS"),
+            ("Yaris / Yaris Cross", "YARIS / YARIS CROSS"),
+        )
+        normalized = []
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                actual = normalizer.normalize_text(raw)
+                self.assertEqual(actual, expected)
+                self.assertEqual(normalizer.latin_comparison_text(actual), expected)
+                normalized.append(actual)
+        self.assertEqual(len(normalized), len(set(normalized)))
+
+    def test_comparison_does_not_overwrite_raw_or_normalized_values(self):
+        row = normalizer.normalize_row({"brand": "Mercedes-Βen", "model": "Golf +"})
+        self.assertEqual((row["brand_raw"], row["model_raw"]),
+                         ("Mercedes-Βen", "Golf +"))
+        self.assertEqual((row["brand_normalized"], row["model_normalized"]),
+                         ("MERCEDES-BEN", "GOLF +"))
+        self.assertEqual((row["brand_latin"], row["model_latin"]),
+                         ("MERCEDES-BEN", "GOLF +"))
+
     def test_text_normalization_is_idempotent(self):
         for value in ("  Toyota\u00a0Yaris ", "Σιτροέν", "MT—07", "-000XXX",
-                      "ΑΓΝΩΣΤΟ", "Café", "ΑB 150"):
+                      "ΑΓΝΩΣΤΟ", "Café", "ΑB 150", "Mercedes-Ben",
+                      "Mercedes-Βen", "Mercedes-ΒΕΝ", "Golf", "Golf+",
+                      "Golf +", "MT07", "CBR 600 RR", "CBR600RR"):
             with self.subTest(value=value):
                 once = normalizer.normalize_text(value)
                 self.assertEqual(normalizer.normalize_text(once), once)
