@@ -272,7 +272,7 @@ class LatinComparisonTests(unittest.TestCase):
             self.assertEqual(*outputs)
 
 
-class AdvancedV2Tests(unittest.TestCase):
+class AdvancedMatcherTests(unittest.TestCase):
     """Independent identities exercise new rules without claim-derived labels."""
 
     @classmethod

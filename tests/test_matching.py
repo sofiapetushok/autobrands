@@ -1,19 +1,20 @@
 import csv
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import pandas as pd
 
-from autobrands_v2 import normalize
-from autobrands_v2.matching import Matcher, weighted_similarity
-
-
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "data" / "vehicle_catalog.csv"
+sys.path.insert(0, str(ROOT.parent))
+
+from autobrands import normalize
+from autobrands.matching import Matcher, weighted_similarity
 
 
-class V2NormalizationTests(unittest.TestCase):
+class NormalizationTests(unittest.TestCase):
     def test_minimal_unicode_normalization_preserves_identity_information(self):
         cases = [
             ("  υαμαηα ", "ΥΑΜΑΗΑ"),
@@ -26,7 +27,7 @@ class V2NormalizationTests(unittest.TestCase):
         for source, expected in cases:
             with self.subTest(source=source):
                 self.assertEqual(normalize.normalize_text(source), expected)
-        self.assertEqual(normalize.comparison_forms("ΒΜW"), ("ΒΜW", "VMW", "BMW"))
+        self.assertEqual(normalize.comparison_forms("ΒΜW"), ("ΒΜW", "BMW", "VMW"))
         self.assertIn("YAMAHA", normalize.comparison_forms("ΥΑΜΑΗΑ"))
         self.assertIn("OPEL", normalize.comparison_forms("ΟΡΕL"))
         self.assertIn("PENO", normalize.comparison_forms("ΡΕΝΟ"))
@@ -36,7 +37,7 @@ class V2NormalizationTests(unittest.TestCase):
         self.assertLess(weighted_similarity("T o y o t a", "TOYOTA"), 88.0)
 
 
-class V2MatcherTests(unittest.TestCase):
+class MatcherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.matcher = Matcher.from_csv(CATALOG, top_k=5)
@@ -80,9 +81,9 @@ class V2MatcherTests(unittest.TestCase):
         self.assertEqual(yamaha["match_status"], "FUZZY_MATCH")
 
         toyota = self.matcher.resolve("TOYTA", "YARSI")
-        self.assertEqual(toyota["match_status"], "AMBIGUOUS")
-        self.assertEqual(toyota["corrected_brand"], "TOYTA")
-        self.assertEqual(toyota["corrected_model"], "YARSI")
+        self.assertEqual(toyota["match_status"], "FUZZY_MATCH")
+        self.assertEqual(toyota["corrected_brand"], "TOYOTA")
+        self.assertEqual(toyota["corrected_model"], "YARIS")
 
         c3_only = self.matcher.resolve(None, "C3")
         self.assertEqual(c3_only["match_status"], "AMBIGUOUS")
@@ -115,8 +116,8 @@ class V2MatcherTests(unittest.TestCase):
         self.assertEqual(combined_in_brand["candidates"], combined["candidates"])
 
         separated = self.matcher.resolve("SUZUKI", "VITAR")
-        self.assertEqual(separated["match_status"], "PARTIAL_MATCH")
-        self.assertEqual(separated["corrected_model"], "VITAR")
+        self.assertEqual(separated["match_status"], "FUZZY_MATCH")
+        self.assertEqual(separated["corrected_model"], "VITARA")
 
         damaged_alias = self.matcher.resolve(None, "Σκαραβα$ος")
         self.assertEqual((damaged_alias["corrected_brand"], damaged_alias["corrected_model"]),
@@ -159,8 +160,7 @@ class V2MatcherTests(unittest.TestCase):
                               {"EXACT_MATCH", "ALIAS_MATCH", "MATCHED", "FUZZY_MATCH"})
 
     def test_uncertain_models_are_not_collapsed_or_forced(self):
-        for brand, model in (("Volkswagen", "Golf +"), ("Volkswagen", "Golf+"),
-                             ("Toyota", "Yaris+"), ("Yamaha", "MT-09+")):
+        for brand, model in (("Toyota", "Yaris+"), ("Yamaha", "MT-09+")):
             with self.subTest(brand=brand, model=model):
                 result = self.matcher.resolve(brand, model)
                 self.assertEqual(result["corrected_model"], normalize.latin_fallback(model))
@@ -168,6 +168,46 @@ class V2MatcherTests(unittest.TestCase):
                 self.assertTrue(all(candidate["model"] != "GOLF"
                                     or candidate["score"] < 100
                                     for candidate in result["candidates"]))
+
+    def test_trailing_plus_accepts_unique_catalog_base(self):
+        matcher = Matcher([
+            {"brand": "VOLKSWAGEN", "model": "GOLF", "vehicle_type": "car"},
+        ])
+        result = matcher.resolve(None, "Golf +")
+        self.assertEqual((result["corrected_brand"], result["corrected_model"],
+                          result["match_status"]), ("VOLKSWAGEN", "GOLF", "FUZZY_MATCH"))
+        self.assertEqual(result["match_score"], weighted_similarity("Golf +", "GOLF"))
+
+    def test_trailing_plus_stays_ambiguous_for_competing_identities(self):
+        catalogs = (
+            [
+                {"brand": "VOLKSWAGEN", "model": "GOLF", "vehicle_type": "car"},
+                {"brand": "VOLKSWAGEN", "model": "GOLF PLUS", "vehicle_type": "car"},
+            ],
+            [
+                {"brand": "VOLKSWAGEN", "model": "GOLF", "vehicle_type": "car"},
+                {"brand": "FORD", "model": "GOLF", "vehicle_type": "car"},
+            ],
+        )
+        for rows in catalogs:
+            with self.subTest(rows=rows):
+                result = Matcher(rows).resolve(None, "Golf +")
+                self.assertEqual(result["match_status"], "AMBIGUOUS")
+                self.assertEqual(result["corrected_model"], "GOLF +")
+
+        alias_matcher = Matcher([
+            {"brand": "VOLKSWAGEN", "model": "GOLF", "vehicle_type": "car"},
+            {"brand": "VOLKSWAGEN", "model": "GOLF PLUS", "model_aliases": "GOLF+",
+             "vehicle_type": "car"},
+        ])
+        alias_result = alias_matcher.resolve(None, "Golf +")
+        self.assertEqual((alias_result["corrected_model"], alias_result["match_status"]),
+                         ("GOLF PLUS", "ALIAS_MATCH"))
+
+        identified = Matcher(catalogs[1]).resolve("VOLKSWAGEN", "Golf +")
+        self.assertEqual((identified["corrected_brand"], identified["corrected_model"],
+                          identified["match_status"]),
+                         ("VOLKSWAGEN", "GOLF", "FUZZY_MATCH"))
 
     def test_numeric_model_variants_are_not_collapsed(self):
         beetle = self.matcher.resolve("Volkswagen", "Beetle 1300")
@@ -232,7 +272,8 @@ class V2MatcherTests(unittest.TestCase):
         self.assertEqual(result.loc[4].iloc[0]["corrected_brand"], "BMW")
         self.assertEqual(result.loc[4].iloc[1]["corrected_model"], "MT-07")
         self.assertEqual(result.loc[8, "corrected_brand"].tolist(), ["", "VOLKSWAGEN"])
-        self.assertEqual(result.loc[8, "corrected_model"].tolist(), ["", "GOLF +"])
+        self.assertEqual(result.loc[8, "corrected_model"].tolist(), ["", "GOLF"])
+        self.assertEqual(result.loc[8, "match_status"].tolist(), ["UNRESOLVED", "FUZZY_MATCH"])
 
     def test_brand_only_model_only_and_empty_dataframe_schemas(self):
         brand = self.matcher.match_dataframe(pd.DataFrame({"make": ["VW", "nope"]}), brand_col="make")

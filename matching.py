@@ -1,7 +1,7 @@
-"""Independent Unicode-aware catalog matcher for AutoBrands V2.
+"""Unicode-aware catalog matcher for AutoBrands.
 
-V2 keeps normalized Unicode unchanged, retrieves candidates with bounded
-catalog indexes, and applies weighted edit distance only to those candidates.
+The matcher keeps normalized Unicode unchanged, retrieves candidates with
+bounded catalog indexes, and applies weighted edit distance only to those candidates.
 ``match_score`` is the top candidate's ranking score, not a probability or an
 acceptance-confidence estimate. Exact canonical, explicit-alias, spacing and
 Unicode-equivalent comparisons can score 100. ``match_status`` and candidate
@@ -110,8 +110,8 @@ def _directed_distance(source: str, target: str) -> float:
 
 def weighted_similarity(left: str, right: str) -> float:
     """Return deterministic 0–100 weighted similarity for two Unicode strings."""
-    source = normalize.normalize_text(left) or ""
-    target = normalize.normalize_text(right) or ""
+    source = normalize.matching_form(left)
+    target = normalize.matching_form(right)
     if not source or not target:
         return 0.0
     if _exact_comparison_equivalence(source, target):
@@ -130,8 +130,15 @@ def _compact(value: str) -> str:
     return "".join(char for char in value if char.isalnum())
 
 
-def _punctuation(value: str) -> tuple[str, ...]:
-    return tuple(char for char in value if char in _SIGNIFICANT_PUNCTUATION)
+def _punctuation(value: str) -> tuple[tuple[str, int], ...]:
+    positions = []
+    alphanumeric_count = 0
+    for char in value:
+        if char in _SIGNIFICANT_PUNCTUATION:
+            positions.append((char, alphanumeric_count))
+        elif char.isalnum():
+            alphanumeric_count += 1
+    return tuple(positions)
 
 
 def _format_equivalent(left: str, right: str) -> bool:
@@ -186,7 +193,6 @@ class Identity:
     model: str
     brand_key: str
     model_key: str
-    vehicle_type: str
     brand_aliases: tuple[str, ...]
     model_aliases: tuple[str, ...]
 
@@ -205,7 +211,7 @@ class Identity:
 
 
 class Matcher:
-    """Catalog-backed V2 matcher with an independent pandas DataFrame API."""
+    """Catalog-backed matcher with a pandas DataFrame API."""
 
     def __init__(self, catalog_rows, *, top_k=5):
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
@@ -218,7 +224,7 @@ class Matcher:
         self.stats = Counter()
         self._score_cache = OrderedDict()
         started = time.perf_counter()
-        grouped = defaultdict(lambda: {"rows": [], "brands": set(), "models": set(), "types": set()})
+        grouped = defaultdict(lambda: {"rows": [], "brands": set(), "models": set()})
         for row in catalog_rows:
             brand = row.get("brand", "")
             model = row.get("model", "")
@@ -230,26 +236,22 @@ class Matcher:
             group["rows"].append(row)
             group["brands"].update(self._split_aliases(row.get("brand_aliases", "")))
             group["models"].update(self._split_aliases(row.get("model_aliases", "")))
-            group["types"].add(row.get("vehicle_type", "unknown") or "unknown")
 
         self.identities = []
         self.by_pair = {}
         self.by_brand = defaultdict(set)
         self.brand_lookup = defaultdict(set)
-        self.brand_alias_lookup = defaultdict(set)
         self.model_lookup = defaultdict(set)
         self.full_lookup = defaultdict(set)
         self.brand_gram_index = defaultdict(set)
         self.model_gram_index = defaultdict(set)
         self.full_gram_index = defaultdict(set)
-        self.brand_choices = set()
         for key in sorted(grouped):
             group = grouped[key]
             preferred = min(group["rows"], key=lambda item: (item["brand"], item["model"]))
             identity = Identity(
                 brand=preferred["brand"], model=preferred["model"],
                 brand_key=key[0], model_key=key[1],
-                vehicle_type=(next(iter(group["types"])) if len(group["types"]) == 1 else "unknown"),
                 brand_aliases=tuple(sorted(group["brands"])),
                 model_aliases=tuple(sorted(group["models"])),
             )
@@ -257,7 +259,6 @@ class Matcher:
             self.identities.append(identity)
             self.by_pair[key] = identity_id
             self.by_brand[key[0]].add(identity_id)
-            self.brand_choices.add(key[0])
             self._index_identity(identity_id, identity)
         self.load_seconds = time.perf_counter() - started
         self.identity_count = len(self.identities)
@@ -273,7 +274,7 @@ class Matcher:
         rows = []
         with Path(catalog_path).open("r", encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
-            required = {"brand", "model", "vehicle_type"}
+            required = {"brand", "model"}
             missing = required - set(reader.fieldnames or ())
             if missing:
                 raise ValueError(f"Catalog is missing columns: {sorted(missing)}")
@@ -289,14 +290,13 @@ class Matcher:
         for term in brand_terms:
             key = normalize.normalize_text(term) or ""
             self.brand_lookup[key].add(identity.brand_key)
-            if key != identity.brand_key:
-                self.brand_alias_lookup[key].add(identity.brand_key)
             for form in self._forms(term):
                 for gram in _grams(form):
                     self.brand_gram_index[gram].add(identity.brand_key)
         for term in model_terms:
             key = normalize.normalize_text(term) or ""
             self.model_lookup[key].add(identity_id)
+            self.model_lookup[normalize.matching_form(key)].add(identity_id)
             for form in self._forms(term):
                 for gram in _grams(form):
                     self.model_gram_index[gram].add(identity_id)
@@ -394,7 +394,7 @@ class Matcher:
         identity = self.identities[identity_id]
         return self._best_score(raw_model, identity.model_terms)
 
-    def _numeric_context_candidates(self, raw_model, candidate_ids, brand_key=""):
+    def _numeric_context_candidates(self, raw_model, candidate_ids):
         numbers = _numbers(raw_model)
         if not numbers or not candidate_ids:
             return set(candidate_ids), {}
@@ -481,9 +481,11 @@ class Matcher:
         # A single shared retrieval path gathers brand, model, and complete-pair
         # evidence for every populated field, independent of its column name.
         brand_ids, model_ids, full_ids = set(), set(), set()
+        model_ids_by_value = {}
         for value in values:
             brand_ids.update(self._brand_candidates(value))
-            model_ids.update(self._model_candidates(value))
+            model_ids_by_value[value] = self._model_candidates(value)
+            model_ids.update(model_ids_by_value[value])
             if len(_words(value)) > 1:
                 full_ids.update(self._full_candidates(value))
         candidate_ids = set(model_ids) | set(full_ids)
@@ -500,11 +502,12 @@ class Matcher:
             return self._status_result(fallback_brand, fallback_model,
                                        "UNRESOLVED", None, [])
 
+        brand_ranks = {value: self._rank_brands(value) for value in values}
         if len(values) == 1:
             value = values[0]
-            brand_rank = self._rank_brands(value)
+            brand_rank = brand_ranks[value]
             model_hit = any(self._model_score(value, item) >= MIN_MODEL_SCORE
-                            for item in self._model_candidates(value))
+                            for item in model_ids_by_value[value])
             if (brand_rank and brand_rank[0][0] >= MIN_BRAND_SCORE
                     and brand_rank[0][0] - (brand_rank[1][0] if len(brand_rank) > 1 else 0)
                     >= MIN_MARGIN and not model_hit):
@@ -521,33 +524,46 @@ class Matcher:
         # values. One value can represent a brand, model/alias, or full phrase.
         ranked = []
         brand_score_cache = {}
+        brand_rank_scores = {value: dict(brand_ranks[value]) for value in values}
+        evidence_by_id = {}
+        phrase_flags = [len(_words(value)) > 1 for value in values]
+        has_phrase = any(phrase_flags)
         for identity_id in candidate_ids:
             identity = self.identities[identity_id]
+            model_terms = identity.model_terms
+            phrases = identity.phrases if has_phrase else ()
             brand_scores = []
             for value in values:
-                cache_key = (value, identity.brand_key)
-                if cache_key not in brand_score_cache:
-                    brand_score_cache[cache_key] = self._brand_score(value, identity.brand_key)
-                brand_scores.append(brand_score_cache[cache_key])
-            model_scores = [self._model_score(value, identity_id)
-                            for value in values]
+                if identity.brand_key in brand_rank_scores[value]:
+                    brand_scores.append(brand_rank_scores[value][identity.brand_key])
+                else:
+                    cache_key = (value, identity.brand_key)
+                    if cache_key not in brand_score_cache:
+                        brand_score_cache[cache_key] = self._brand_score(
+                            value, identity.brand_key)
+                    brand_scores.append(brand_score_cache[cache_key])
+            model_choices = [self._best_choice(value, model_terms)
+                             for value in values]
+            model_scores = [choice[0] for choice in model_choices]
             model_scores = [max(score, numeric_scores.get(identity_id, 0.0))
                             for score in model_scores]
-            phrase_scores = [self._best_score(value, identity.phrases)
-                             for value in values if len(_words(value)) > 1]
+            phrase_choices = [
+                self._best_choice(value, phrases) if is_phrase else None
+                for value, is_phrase in zip(values, phrase_flags)
+            ]
+            phrase_scores = [choice[0] for choice in phrase_choices if choice is not None]
             best_brand = max(brand_scores, default=0.0)
             best_model = max(model_scores, default=0.0)
             best_phrase = max(phrase_scores, default=0.0)
             pair_score = 0.0
             pair_brand = pair_model = 0.0
             if len(values) > 1:
-                for i, first in enumerate(values):
-                    for j, second in enumerate(values):
+                for i in range(len(values)):
+                    for j in range(len(values)):
                         if i == j:
                             continue
-                        b_score = self._brand_score(first, identity.brand_key)
-                        m_score = max(self._model_score(second, identity_id),
-                                      numeric_scores.get(identity_id, 0.0))
+                        b_score = brand_scores[i]
+                        m_score = model_scores[j]
                         score = 0.35 * b_score + 0.65 * m_score
                         if score > pair_score:
                             pair_score, pair_brand, pair_model = score, b_score, m_score
@@ -555,13 +571,14 @@ class Matcher:
                      else max(best_phrase, best_model, best_brand))
             b_score = pair_brand if len(values) > 1 else best_brand
             m_score = max(pair_model, best_phrase) if len(values) > 1 else max(best_model, best_phrase)
-            _, model_term = self._best_choice(
-                values[model_scores.index(max(model_scores))], identity.model_terms
-            ) if identity.model_terms else (0.0, "")
+            best_model_index = max(range(len(model_scores)), key=model_scores.__getitem__)
+            model_term = model_choices[best_model_index][1]
             ranked.append({"identity_id": identity_id, "score": round(score, 1),
                            "brand_score": round(b_score, 1),
                            "model_score": round(m_score, 1),
                            "model_term": model_term})
+            evidence_by_id[identity_id] = (
+                brand_scores, model_scores, model_choices, phrase_choices)
         ranked.sort(key=lambda item: (-item["score"], -item["model_score"],
                                       self.identities[item["identity_id"]].brand_key,
                                       self.identities[item["identity_id"]].model_key))
@@ -576,14 +593,16 @@ class Matcher:
         # over a superficially strong joint score.
         recognized_brands = []
         recognized_models = []
-        for value in values:
-            brand_rank = self._rank_brands(value)
+        for value_index, value in enumerate(values):
+            brand_rank = brand_ranks[value]
             if brand_rank and brand_rank[0][0] >= MIN_BRAND_SCORE:
                 gap = brand_rank[0][0] - (brand_rank[1][0] if len(brand_rank) > 1 else 0)
                 if gap >= MIN_MARGIN:
                     recognized_brands.append(brand_rank[0][1])
-            exact_models = {item for item in self._model_candidates(value)
-                            if self._model_score(value, item) >= MIN_MODEL_SCORE}
+            exact_models = {
+                item for item in model_ids_by_value[value]
+                if evidence_by_id[item][2][value_index][0] >= MIN_MODEL_SCORE
+            }
             if exact_models:
                 recognized_models.extend(exact_models)
         if (len(set(recognized_brands)) == 1 and recognized_models
@@ -602,21 +621,21 @@ class Matcher:
                 margin = top["score"] - (ranked[1]["score"] if len(ranked) > 1 else 0.0)
                 candidates = self._candidate_output(ranked)
 
-        model_inputs = [(value, max(self._model_score(value, top["identity_id"]),
-                                    numeric_scores.get(top["identity_id"], 0.0)))
-                        for value in values]
-        model_value, model_score = max(model_inputs, key=lambda item: item[1])
-        brand_value_text, brand_score = max(
-            ((value, self._brand_score(value, identity.brand_key)) for value in values),
-            key=lambda item: item[1], default=("", 0.0))
-        phrase_options = [(value, self._best_score(value, identity.phrases))
-                          for value in values if len(_words(value)) > 1]
-        phrase_value, phrase_score = max(phrase_options, key=lambda item: item[1],
-                                         default=("", 0.0))
+        brand_scores, model_scores, model_choices, phrase_choices = evidence_by_id[
+            top["identity_id"]]
+        model_index = max(range(len(values)), key=model_scores.__getitem__)
+        model_value, model_score = values[model_index], model_scores[model_index]
+        brand_index = max(range(len(values)), key=brand_scores.__getitem__)
+        brand_value_text, brand_score = values[brand_index], brand_scores[brand_index]
+        phrase_options = [
+            (value, choice[0], choice[1])
+            for value, choice in zip(values, phrase_choices) if choice is not None
+        ]
+        phrase_value, phrase_score, best_phrase_term = max(
+            phrase_options, key=lambda item: item[1], default=("", 0.0, ""))
         accepted_identity = None
         method = ""
         if phrase_value and phrase_score >= MIN_PAIR_SCORE:
-            _, best_phrase_term = self._best_choice(phrase_value, identity.phrases)
             phrase_safe = (_punctuation(phrase_value) == _punctuation(best_phrase_term)
                            and (not _numbers(phrase_value)
                                 or _numbers(phrase_value) == _numbers(identity.model_key))
@@ -633,8 +652,7 @@ class Matcher:
             brand_safe = brand_score >= MIN_BRAND_SCORE
             if not brand_safe and model_score >= MIN_MODEL_SCORE + MIN_MARGIN:
                 brand_rank = sorted(
-                    ((self._brand_score(value, key), key)
-                     for value in values for key in self._brand_candidates(value)),
+                    (item for value in values for item in brand_ranks[value]),
                     key=lambda item: (-item[0], item[1]),
                 )
                 brand_safe = bool(
@@ -682,6 +700,46 @@ class Matcher:
             return self._status_result(normalize.latin_fallback(identity.brand),
                                        normalize.latin_fallback(identity.model), status,
                                        top["score"], candidates)
+
+        model_key = normalize.matching_form(model_value)
+        if model_key.endswith("+"):
+            base_model = model_key[:-1]
+            brand_keys = set(recognized_brands)
+            base_matches = set(self.model_lookup.get(base_model, ()))
+            base_ids = {item for item in base_matches
+                        if normalize.matching_form(self.identities[item].model) == base_model}
+            if len(brand_keys) == 1:
+                brand_ids = self.by_brand[next(iter(brand_keys))]
+                base_matches &= brand_ids
+                base_ids &= brand_ids
+            plus_ids = set(self.model_lookup.get(model_key, ()))
+            plus_variant_ids = (set(self.model_lookup.get(f"{base_model} PLUS", ()))
+                                | set(self.model_lookup.get(f"{base_model}PLUS", ()))
+                                | set(self.model_lookup.get(base_model + "+", ())))
+            related_ids = candidate_ids | base_matches | plus_variant_ids
+            if len(brand_keys) == 1:
+                related_ids &= self.by_brand[next(iter(brand_keys))]
+            base_words = _words(base_model)
+            competing_variant = False
+            for item in related_ids - base_ids:
+                for term in self.identities[item].model_terms:
+                    term_words = _words(normalize.matching_form(term))
+                    if (len(term_words) > len(base_words)
+                            and term_words[:len(base_words)] == base_words):
+                        competing_variant = True
+                        break
+                if competing_variant:
+                    break
+            if (len(brand_keys) <= 1 and len(base_ids) == 1 and base_matches == base_ids
+                    and not plus_ids and not (plus_variant_ids - base_ids)
+                    and not competing_variant and top["identity_id"] in base_ids
+                    and top["score"] >= MIN_MODEL_SCORE and margin >= MIN_MARGIN
+                    and (len(values) == 1 or
+                         (not phrase_value and model_score >= MIN_MODEL_SCORE and brand_safe))):
+                identity = self.identities[next(iter(base_ids))]
+                return self._status_result(normalize.latin_fallback(identity.brand),
+                                           normalize.latin_fallback(identity.model),
+                                           "FUZZY_MATCH", top["score"], candidates)
 
         if top["score"] >= REVIEW_SCORE and margin < MIN_MARGIN:
             return self._status_result(fallback_brand, fallback_model, "AMBIGUOUS",
@@ -746,7 +804,10 @@ class Matcher:
         canonical_key = normalize.normalize_text(canonical) or ""
         if value == canonical_key:
             return "EXACT_CANONICAL"
-        if value in {normalize.normalize_text(alias) or "" for alias in aliases}:
+        alias_keys = tuple(normalize.normalize_text(alias) or "" for alias in aliases)
+        if value in alias_keys:
+            return "EXPLICIT_ALIAS"
+        if any(_format_equivalent(value, alias) for alias in alias_keys):
             return "EXPLICIT_ALIAS"
         if _format_equivalent(value, canonical_key):
             return "FORMATTING_EQUIVALENCE"
@@ -760,7 +821,7 @@ class Matcher:
         try:
             import pandas as pd
         except ImportError as exc:
-            raise ImportError("V2 DataFrame matching requires pandas") from exc
+            raise ImportError("DataFrame matching requires pandas") from exc
         if not isinstance(df, pd.DataFrame):
             raise TypeError("df must be a pandas DataFrame")
         if not df.columns.is_unique:
