@@ -815,83 +815,82 @@ class Matcher:
             return "UNICODE_EQUIVALENCE"
         return "ORDINARY_FUZZY"
 
-    def match_dataframe(self, df, *, brand_col=None, model_col=None,
-                        top_k=None, debug=False):
-        """Match raw DataFrame columns while preserving source values, index, and order."""
-        try:
-            import pandas as pd
-        except ImportError as exc:
-            raise ImportError("DataFrame matching requires pandas") from exc
-        if not isinstance(df, pd.DataFrame):
-            raise TypeError("df must be a pandas DataFrame")
-        if not df.columns.is_unique:
-            raise ValueError("DataFrame column names must be unique")
-        if brand_col is None and model_col is None:
-            raise ValueError("Supply brand_col, model_col, or both")
-        for name in (brand_col, model_col):
-            if name is not None and (not isinstance(name, str) or not name or name not in df.columns):
-                raise ValueError(f"Selected input column not found: {name!r}")
-        if brand_col is not None and brand_col == model_col:
-            raise ValueError("brand_col and model_col must differ")
-        if top_k is None:
-            top_k = self.top_k
-        if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= self.top_k:
-            raise ValueError(f"top_k must be between 1 and {self.top_k}")
-        if not isinstance(debug, bool):
-            raise TypeError("debug must be bool")
+    
+def match_dataframe(self, df, *, input_cols, top_k=None, debug=False):
+    """Match one or two DataFrame columns independently of their names."""
+    import pandas as pd
 
-        outputs = []
-        decision_cache = {}
-        for position in range(len(df)):
-            raw_brand = df[brand_col].iloc[position] if brand_col is not None else None
-            raw_model = df[model_col].iloc[position] if model_col is not None else None
-            cache_key = (normalize.normalize_text(raw_brand), normalize.normalize_text(raw_model))
-            decision = decision_cache.get(cache_key)
-            if decision is None:
-                decision = self.resolve(raw_brand, raw_model)
-                decision_cache[cache_key] = decision
-            row = {}
-            if brand_col is not None:
-                row["corrected_brand"] = decision.get("corrected_brand", "")
-            if model_col is not None:
-                row["corrected_model"] = decision.get("corrected_model", "")
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+    if not df.columns.is_unique:
+        raise ValueError("DataFrame column names must be unique")
+    if not isinstance(input_cols, (list, tuple)) or not 1 <= len(input_cols) <= 2:
+        raise ValueError("input_cols must contain one or two column names")
+    if any(not isinstance(c, str) or c not in df.columns for c in input_cols):
+        raise ValueError("Selected input column not found")
+    if len(set(input_cols)) != len(input_cols):
+        raise ValueError("Input columns must differ")
+
+    top_k = self.top_k if top_k is None else top_k
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= self.top_k:
+        raise ValueError(f"top_k must be between 1 and {self.top_k}")
+    if not isinstance(debug, bool):
+        raise TypeError("debug must be bool")
+
+    outputs = []
+    cache = {}
+
+    for values in df[list(input_cols)].itertuples(index=False, name=None):
+        key = tuple(normalize.normalize_text(v) or "" for v in values)
+
+        if key not in cache:
+            cache[key] = self.resolve(*values)
+
+        decision = cache[key]
+        row = {
+            "corrected_brand": decision.get("corrected_brand", ""),
+            "corrected_model": decision.get("corrected_model", ""),
+            "match_status": decision["match_status"],
+            "match_score": decision["match_score"],
+            "candidates": decision["candidates"][:top_k],
+        }
+
+        if debug:
+            source = list(values) + [None] * (2 - len(values))
+            candidates = decision["candidates"]
             row.update({
-                "match_status": decision["match_status"],
-                "match_score": decision["match_score"],
-                "candidates": decision["candidates"][:top_k],
+                "ab_brand_normalized": normalize.normalize_text(source[0]) or "",
+                "ab_model_normalized": normalize.normalize_text(source[1]) or "",
+                "ab_brand_score": decision["match_score"],
+                "ab_model_score": decision["match_score"],
+                "ab_score_margin": (
+                    candidates[0]["score"] - candidates[1]["score"]
+                    if len(candidates) > 1 else None
+                ),
+                "ab_match_method": self._decision_match_method(
+                    source[0], source[1], decision
+                ),
             })
-            if debug:
-                candidates = decision["candidates"]
-                score = decision["match_score"]
-                margin = (candidates[0]["score"] - candidates[1]["score"]
-                          if len(candidates) > 1 else None)
-                row.update({
-                    "ab_brand_normalized": normalize.normalize_text(raw_brand) or "",
-                    "ab_model_normalized": normalize.normalize_text(raw_model) or "",
-                    "ab_brand_score": score if brand_col is not None else None,
-                    "ab_model_score": score if model_col is not None else None,
-                    "ab_score_margin": margin,
-                    "ab_match_method": self._decision_match_method(
-                        raw_brand, raw_model, decision
-                    ),
-                })
-            outputs.append(row)
 
-        result_columns = []
-        if brand_col is not None:
-            result_columns.append("corrected_brand")
-        if model_col is not None:
-            result_columns.append("corrected_model")
-        result_columns.extend(["match_status", "match_score", "candidates"])
-        debug_columns = (["ab_brand_normalized", "ab_model_normalized", "ab_brand_score",
-                          "ab_model_score", "ab_score_margin", "ab_match_method"] if debug else [])
-        collisions = set(result_columns + debug_columns) & set(df.columns)
-        if collisions:
-            raise ValueError(f"Output column name collision: {', '.join(sorted(collisions))}")
-        result = df.copy(deep=False)
-        for name in result_columns + debug_columns:
-            result[name] = [row.get(name) for row in outputs]
-        return result
+        outputs.append(row)
+
+    columns = ["corrected_brand", "corrected_model",
+               "match_status", "match_score", "candidates"]
+
+    if debug:
+        columns += ["ab_brand_normalized", "ab_model_normalized",
+                    "ab_brand_score", "ab_model_score",
+                    "ab_score_margin", "ab_match_method"]
+
+    collisions = set(columns) & set(df.columns)
+    if collisions:
+        raise ValueError(f"Output column name collision: {sorted(collisions)}")
+
+    result = df.copy()
+    for column in columns:
+        result[column] = [row[column] for row in outputs]
+
+    return result
 
 
 __all__ = ["Matcher", "Identity", "weighted_similarity", "EDIT_COSTS"]
